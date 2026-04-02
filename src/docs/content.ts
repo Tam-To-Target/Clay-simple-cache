@@ -167,4 +167,104 @@ Retrieve a company by identifier.
   }
 }
 \`\`\`
+
+---
+
+## Email Finder
+
+### 5. Find Email
+**POST** \`/find\`
+
+Given a person's name and company domain, finds their most likely email address using pattern permutation and multi-tier API verification.
+
+**Request Body (JSON)**:
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`first_name\` | String | No* | Person's first name. |
+| \`last_name\` | String | No* | Person's last name. |
+| \`full_name\` | String | No* | Full name (parsed with LATAM logic). |
+| \`domain\` | String | **Yes** | Company domain (e.g. "empresa.com"). |
+| \`max_tier\` | Number | No | Max verification tier: 1 or 2 (default: 2). |
+
+*At least one of \`first_name\`, \`last_name\`, or \`full_name\` is required.*
+
+**Response (JSON)**:
+\`\`\`json
+{
+  "success": true,
+  "email": "juan.garcia@empresa.com",
+  "status": "valid",
+  "confidence": 0.95,
+  "method": "emaillistverify",
+  "pattern": "first.last",
+  "domain_info": {
+    "domain": "empresa.com",
+    "has_mx": true,
+    "provider": "google_workspace",
+    "is_catch_all": false,
+    "is_disposable": false,
+    "is_free_provider": false
+  },
+  "permutations_tried": 1,
+  "cost_usd": 0.0004,
+  "duration_ms": 983
+}
+\`\`\`
+
+**Possible \`status\` values**: \`valid\`, \`invalid\`, \`catch_all\`, \`unknown\`, \`risky\`, \`disposable\`, \`no_mx\`, \`role_account\`.
+
+---
+
+### 6. Verify Email
+**POST** \`/verify\`
+
+Verify an existing email address through the API cascade.
+
+**Request Body (JSON)**:
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`email\` | String | **Yes** | The email to verify. |
+| \`max_tier\` | Number | No | Max verification tier: 1 or 2 (default: 2). |
+
+**Response (JSON)**:
+\`\`\`json
+{
+  "email": "juan@empresa.com",
+  "status": "valid",
+  "confidence": 0.95,
+  "method": "emaillistverify",
+  "domain_info": { ... },
+  "cost_usd": 0.0004,
+  "duration_ms": 450
+}
+\`\`\`
+
+---
+
+### 7. Stats
+**GET** \`/stats\`
+
+Returns aggregate metrics for the email finder service.
+
+**Response (JSON)**:
+\`\`\`json
+{
+  "total_searches": 100,
+  "total_valid_found": 15,
+  "success_rate": 0.15,
+  "methods_breakdown": { "emaillistverify": 12, "debounce": 3 },
+  "total_cost_usd": 0.099,
+  "avg_cost_per_email": 0.00099,
+  "domains_in_cache": 93,
+  "patterns_learned": 8,
+  "catch_all_domains": 17
+}
+\`\`\`
+
+---
+
+### Pending (Not Yet Implemented)
+- **POST /find/batch** — Batch email finding (accepts array of contacts, processes in background).
+- **POST /verify/batch** — Batch email verification.
+- **Tier 3 verification** — NeverBounce provider ($0.008/email).
 `;
