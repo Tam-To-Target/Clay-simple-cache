@@ -40,8 +40,9 @@ export interface DomainInfo {
 export interface SerpInfo {
   used: boolean;
   emails_found: number;
+  rocketreach_pattern: { pattern: string; example: string; percentage: number; raw_format: string } | null;
   patterns_detected: { pattern: string; count: number; examples: string[] }[];
-  direct_match: string | null; // exact match for our target person found in SERP
+  direct_match: string | null;
 }
 
 export interface VerificationResult {
