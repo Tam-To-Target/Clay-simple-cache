@@ -175,11 +175,8 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   let serpDirectMatch: string | null = null;
   const serpUsed = !!config.serper_api_key;
 
-  // Analyze SERP results: RocketReach structured pattern + raw emails
-  const hasResults = serpResult.emails.length > 0 || serpResult.rocketreach_pattern;
-
-  if (hasResults) {
-    serpPatterns = identifyPatternsFromEmails(serpResult.emails, serpResult.rocketreach_pattern);
+  if (serpResult.emails.length > 0) {
+    serpPatterns = identifyPatternsFromEmails(serpResult.emails);
 
     // Check if any SERP email is an exact match for our target person
     for (const serpEmail of serpResult.emails) {
@@ -220,7 +217,6 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   const serpInfo: SerpInfo = {
     used: serpUsed,
     emails_found: serpResult.emails.length,
-    rocketreach_pattern: serpResult.rocketreach_pattern,
     patterns_detected: serpPatterns,
     direct_match: serpDirectMatch,
   };

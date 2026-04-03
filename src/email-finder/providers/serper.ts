@@ -2,36 +2,9 @@ import { config } from "../config";
 
 export interface SerpEmailResult {
   emails: string[];
-  rocketreach_pattern: RocketReachPattern | null;
   domain: string;
   cost_usd: number;
 }
-
-export interface RocketReachPattern {
-  pattern: string;       // our internal pattern name (e.g., "flast", "first.last")
-  example: string;       // e.g., "jdoe@hubspot.com"
-  percentage: number;    // e.g., 73.5
-  raw_format: string;    // e.g., "[first_initial][last]"
-}
-
-// Map RocketReach format descriptors to our internal pattern names
-const ROCKETREACH_FORMAT_MAP: Record<string, string> = {
-  "[first_initial][last]": "flast",
-  "[first].[last]": "first.last",
-  "[first][last]": "firstlast",
-  "[first]_[last]": "first_last",
-  "[first]-[last]": "first-last",
-  "[first]": "first",
-  "[last]": "last",
-  "[last][first_initial]": "lastf",
-  "[last].[first]": "last.first",
-  "[first_initial].[last]": "f.last",
-  "[first].[last_initial]": "first.l",
-  "[first][last_initial]": "firstl",
-  "[first_initial]_[last]": "f_last",
-  "[last]_[first]": "last_first",
-  "[last].[first_initial]": "last.f",
-};
 
 /**
  * Run a single Serper search and return raw organic results.
@@ -56,197 +29,59 @@ async function serperSearch(
 }
 
 /**
- * Parse RocketReach email format snippets.
- * Matches patterns like:
- *   "The most common X email format is [first_initial][last] (ex. jdoe@hubspot.com), which is being used by 73.5%"
- *   "Stripe uses 11 email formats: 1. first@stripe.com (32.6%)"
- *   "FLast@hubspot.com; this email format is used 86% of the time"
- */
-function parseRocketReachSnippets(
-  snippets: string[],
-  domain: string
-): RocketReachPattern | null {
-  const emailRegex = new RegExp(
-    `([a-zA-Z0-9._%+\\-]+)@${escapeRegex(domain)}`,
-    "i"
-  );
-
-  for (const snippet of snippets) {
-    // Pattern 1: "[format_desc] (ex. email@domain), which is being used by XX.X%"
-    const formatMatch = snippet.match(
-      /format is (\[[^\]]+\](?:\[[^\]]+\])*)\s*\(ex\.\s*([^)]+)\).*?(\d+\.?\d*)%/i
-    );
-    if (formatMatch) {
-      const rawFormat = formatMatch[1].toLowerCase();
-      const example = formatMatch[2].trim().toLowerCase();
-      const percentage = parseFloat(formatMatch[3]);
-      const pattern = ROCKETREACH_FORMAT_MAP[rawFormat];
-      if (pattern && emailRegex.test(example)) {
-        return { pattern, example, percentage, raw_format: rawFormat };
-      }
-    }
-
-    // Pattern 2: "FLast@domain.com; this email format is used XX% of the time" (LeadIQ style)
-    const leadiqMatch = snippet.match(
-      /([A-Za-z]+)@[^\s;]+;\s*this email format is used\s*(\d+\.?\d*)%/i
-    );
-    if (leadiqMatch) {
-      const formatHint = leadiqMatch[1]; // e.g., "FLast"
-      const percentage = parseFloat(leadiqMatch[2]);
-      const emailMatch = snippet.match(emailRegex);
-      if (emailMatch) {
-        const pattern = inferPatternFromHint(formatHint);
-        if (pattern) {
-          return {
-            pattern,
-            example: emailMatch[0].toLowerCase(),
-            percentage,
-            raw_format: formatHint,
-          };
-        }
-      }
-    }
-
-    // Pattern 3: "1. first@domain.com (XX.X%)" — numbered format list
-    const numberedMatch = snippet.match(
-      /1\.\s*([a-zA-Z0-9._%+-]+@[^\s]+)\s*\((\d+\.?\d*)%\)/
-    );
-    if (numberedMatch) {
-      const example = numberedMatch[1].toLowerCase();
-      const percentage = parseFloat(numberedMatch[2]);
-      if (emailRegex.test(example)) {
-        const local = example.split("@")[0];
-        const pattern = inferPatternFromExample(local);
-        if (pattern) {
-          return { pattern, example, percentage, raw_format: local };
-        }
-      }
-    }
-  }
-
-  return null;
-}
-
-/**
- * Infer pattern from LeadIQ-style hints like "FLast", "First.Last", etc.
- */
-function inferPatternFromHint(hint: string): string | null {
-  const h = hint.toLowerCase();
-  if (h === "flast") return "flast";
-  if (h === "first.last") return "first.last";
-  if (h === "firstlast") return "firstlast";
-  if (h === "first") return "first";
-  if (h === "last") return "last";
-  if (h === "lastf") return "lastf";
-  if (h === "f.last") return "f.last";
-  if (h === "first.l") return "first.l";
-  if (h === "first_last") return "first_last";
-  if (h === "first-last") return "first-last";
-  return null;
-}
-
-/**
- * Infer pattern from a concrete example local part like "jane", "jdoe", "john.doe".
- * Used when RocketReach gives us a numbered list format.
- */
-function inferPatternFromExample(local: string): string | null {
-  if (local.includes(".")) {
-    const parts = local.split(".");
-    if (parts.length === 2) {
-      if (parts[0].length === 1) return "f.last";
-      if (parts[1].length === 1) return "first.l";
-      return "first.last";
-    }
-  }
-  if (local.includes("_")) {
-    const parts = local.split("_");
-    if (parts.length === 2) {
-      if (parts[0].length === 1) return "f_last";
-      return "first_last";
-    }
-  }
-  if (local.includes("-")) return "first-last";
-
-  // No separator — check common example names
-  // RocketReach uses "jane", "jdoe", "janedoe", etc.
-  if (/^[a-z]{1}[a-z]{3,}$/.test(local)) return "flast"; // jdoe, jsmith
-  if (/^[a-z]{2,8}$/.test(local)) return "first";         // jane, john
-  return null;
-}
-
-/**
  * Search Google via Serper API for emails at a given domain.
  *
- * Two-query strategy:
- * 1. "rocketreach.co {domain} email format" — parses structured RocketReach snippets
- *    that explicitly state the pattern + percentage (e.g., "[first_initial][last] used by 73.5%")
- * 2. "{domain} email contact" — catches raw emails from the web (footers, about pages, etc.)
+ * Single query: "{domain} email" — the most effective for both large and small domains.
+ * Catches emails from footers, about/contact pages, directories, and profile sites.
  */
 export async function searchSerpForEmails(
   domain: string
 ): Promise<SerpEmailResult> {
   const result: SerpEmailResult = {
     emails: [],
-    rocketreach_pattern: null,
     domain,
     cost_usd: 0,
   };
 
   if (!config.serper_api_key) return result;
 
-  // Run both queries in parallel
-  const [rrData, genericData] = await Promise.all([
-    serperSearch(`rocketreach.co "${domain}" email format`),
-    serperSearch(`"${domain}" email contact`),
-  ]);
+  const data = await serperSearch(`${domain} email`);
+  if (!data) return result;
 
-  // Each Serper search costs ~$0.001
-  result.cost_usd = (rrData ? 0.001 : 0) + (genericData ? 0.001 : 0);
+  result.cost_usd = 0.001;
 
-  // ── Query 1: Parse RocketReach snippets for structured pattern info ──
-  if (rrData) {
-    const snippets = (rrData.organic || [])
-      .map((item: any) => item.snippet || "")
-      .filter(Boolean);
-    result.rocketreach_pattern = parseRocketReachSnippets(snippets, domain);
-  }
-
-  // ── Query 2: Extract raw emails from generic search results ──
+  // Extract emails from all result fields
   const emailRegex = new RegExp(
     `[a-zA-Z0-9._%+\\-]+@${escapeRegex(domain)}`,
     "gi"
   );
   const foundEmails = new Set<string>();
 
-  for (const data of [rrData, genericData]) {
-    if (!data) continue;
-
-    for (const item of data.organic || []) {
-      const text = [item.title, item.snippet, item.link].filter(Boolean).join(" ");
-      const matches = text.match(emailRegex);
-      if (matches) {
-        for (const m of matches) foundEmails.add(m.toLowerCase());
-      }
-    }
-
-    if (data.knowledgeGraph) {
-      const kgText = JSON.stringify(data.knowledgeGraph);
-      const matches = kgText.match(emailRegex);
-      if (matches) {
-        for (const m of matches) foundEmails.add(m.toLowerCase());
-      }
-    }
-
-    for (const item of data.peopleAlsoAsk || []) {
-      const text = [item.title, item.snippet].filter(Boolean).join(" ");
-      const matches = text.match(emailRegex);
-      if (matches) {
-        for (const m of matches) foundEmails.add(m.toLowerCase());
-      }
+  for (const item of data.organic || []) {
+    const text = [item.title, item.snippet, item.link].filter(Boolean).join(" ");
+    const matches = text.match(emailRegex);
+    if (matches) {
+      for (const m of matches) foundEmails.add(m.toLowerCase());
     }
   }
 
-  // Filter out role accounts
+  if (data.knowledgeGraph) {
+    const kgText = JSON.stringify(data.knowledgeGraph);
+    const matches = kgText.match(emailRegex);
+    if (matches) {
+      for (const m of matches) foundEmails.add(m.toLowerCase());
+    }
+  }
+
+  for (const item of data.peopleAlsoAsk || []) {
+    const text = [item.title, item.snippet].filter(Boolean).join(" ");
+    const matches = text.match(emailRegex);
+    if (matches) {
+      for (const m of matches) foundEmails.add(m.toLowerCase());
+    }
+  }
+
+  // Filter out role accounts and generic example emails
   const ROLE_PREFIXES = [
     "info", "admin", "support", "contact", "contacto", "hello", "help",
     "sales", "marketing", "office", "team", "hr", "jobs",
@@ -255,12 +90,11 @@ export async function searchSerpForEmails(
     "privacy", "security", "feedback", "newsletter", "hola",
   ];
 
-  // Also filter out RocketReach example emails (generic names like "jane", "jdoe")
-  const RR_EXAMPLE_LOCALS = ["jane", "jdoe", "john", "johndoe", "john.doe", "j.doe"];
+  const GENERIC_LOCALS = ["jane", "jdoe", "john", "johndoe", "john.doe", "j.doe"];
 
   for (const email of foundEmails) {
     const local = email.split("@")[0];
-    if (!ROLE_PREFIXES.includes(local) && !RR_EXAMPLE_LOCALS.includes(local)) {
+    if (!ROLE_PREFIXES.includes(local) && !GENERIC_LOCALS.includes(local)) {
       result.emails.push(email);
     }
   }
@@ -388,25 +222,11 @@ function resolveNoSepPatterns(
  * (since it has explicit percentage data from a large sample).
  */
 export function identifyPatternsFromEmails(
-  emails: string[],
-  rocketreachPattern: RocketReachPattern | null = null
+  emails: string[]
 ): { pattern: string; count: number; examples: string[] }[] {
+  if (emails.length === 0) return [];
+
   const patternCounts = new Map<string, { count: number; examples: string[] }>();
-
-  // If RocketReach gave us a pattern, seed it with high count
-  if (rocketreachPattern) {
-    patternCounts.set(rocketreachPattern.pattern, {
-      count: Math.max(10, Math.round(rocketreachPattern.percentage / 5)),
-      examples: [rocketreachPattern.example],
-    });
-  }
-
-  if (emails.length === 0 && !rocketreachPattern) return [];
-  if (emails.length === 0) {
-    return Array.from(patternCounts.entries())
-      .map(([pattern, data]) => ({ pattern, count: data.count, examples: data.examples }))
-      .sort((a, b) => b.count - a.count);
-  }
 
   // Step 1: Classify emails with separators (unambiguous)
   const noSepLocals: string[] = [];
