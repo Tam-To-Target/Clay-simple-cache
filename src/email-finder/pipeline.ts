@@ -181,20 +181,24 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
 
   // ── 7. API cascade with parallelization ──
   // Strategy: verify in parallel batches for speed.
-  // We check batches of 5 at a time and stop as soon as we get a conclusive result.
+  // Each batch fires all calls simultaneously, then we scan results for a winner.
   let riskyCandidate: VerificationResult | null = null;
+  let catchAllCandidate: VerificationResult | null = null;
   const BATCH_SIZE = 5;
 
   for (let i = 0; i < permutations.length; i += BATCH_SIZE) {
     const batch = permutations.slice(i, i + BATCH_SIZE);
     const results = await apiCascadeParallel(batch, maxTier, BATCH_SIZE);
 
+    // Count the whole batch as tried (they all ran in parallel)
+    permutationsTried += batch.length;
+    apiCalls += batch.length;
+    for (const r of results) totalCost += r.cost_usd;
+
+    // Scan batch results: valid wins immediately, catch_all/risky are saved, invalid is skipped
     for (let j = 0; j < results.length; j++) {
       const result = results[j];
       const email = batch[j];
-      apiCalls++;
-      totalCost += result.cost_usd;
-      permutationsTried++;
 
       if (result.status === EmailStatus.valid) {
         const pattern = identifyPattern(email, first, last);
@@ -214,33 +218,14 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
         });
       }
 
-      if (result.status === EmailStatus.invalid) {
-        await logSearch(first, last, domain, null, "invalid", result.method, permutationsTried, apiCalls, totalCost, Date.now() - start);
-        return makeResult({
-          status: EmailStatus.invalid,
-          confidence: result.confidence,
-          method: result.method,
-          domain_info: domainInfo,
-          permutations_tried: permutationsTried,
-          cost_usd: totalCost,
-          duration_ms: Date.now() - start,
-        });
-      }
-
-      if (result.status === EmailStatus.catch_all) {
-        const bestGuess = permutations[0];
-        const pattern = identifyPattern(bestGuess, first, last);
-        await logSearch(first, last, domain, bestGuess, "catch_all", result.method, permutationsTried, apiCalls, totalCost, Date.now() - start);
-        return makeResult({
-          email: bestGuess,
+      if (result.status === EmailStatus.catch_all && !catchAllCandidate) {
+        catchAllCandidate = makeResult({
+          email: permutations[0],
           status: EmailStatus.catch_all,
           confidence: 0.5,
           method: result.method,
-          pattern,
+          pattern: identifyPattern(permutations[0], first, last),
           domain_info: domainInfo,
-          permutations_tried: permutationsTried,
-          cost_usd: totalCost,
-          duration_ms: Date.now() - start,
         });
       }
 
@@ -251,11 +236,22 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
           confidence: result.confidence,
           method: result.method,
           domain_info: domainInfo,
-          permutations_tried: permutationsTried,
-          cost_usd: totalCost,
-          duration_ms: Date.now() - start,
         });
       }
+
+      // invalid = this email doesn't exist, continue trying other permutations
+    }
+
+    // If we got catch_all from this batch, no point trying more permutations
+    // (the whole domain accepts everything)
+    if (catchAllCandidate) {
+      await logSearch(first, last, domain, catchAllCandidate.email, "catch_all", catchAllCandidate.method, permutationsTried, apiCalls, totalCost, Date.now() - start);
+      return {
+        ...catchAllCandidate,
+        permutations_tried: permutationsTried,
+        cost_usd: totalCost,
+        duration_ms: Date.now() - start,
+      };
     }
   }
 
