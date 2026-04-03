@@ -37,6 +37,13 @@ export interface DomainInfo {
   smtp_verifiable: boolean;
 }
 
+export interface SerpInfo {
+  used: boolean;
+  emails_found: number;
+  patterns_detected: { pattern: string; count: number; examples: string[] }[];
+  direct_match: string | null; // exact match for our target person found in SERP
+}
+
 export interface VerificationResult {
   email: string | null;
   status: EmailStatus;
@@ -44,6 +51,7 @@ export interface VerificationResult {
   method: VerificationMethod | null;
   pattern: string | null;
   domain_info: DomainInfo | null;
+  serp_info: SerpInfo | null;
   permutations_tried: number;
   cost_usd: number;
   duration_ms: number;

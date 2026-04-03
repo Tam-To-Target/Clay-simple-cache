@@ -6,6 +6,7 @@ import {
   VerificationMethod,
   FindRequest,
   EmailVerificationProvider,
+  SerpInfo,
   CONCLUSIVE_STATUSES,
 } from "./types";
 import { analyzeDomain } from "./domain-intel";
@@ -34,6 +35,7 @@ function makeResult(partial: Partial<VerificationResult>): VerificationResult {
     method: null,
     pattern: null,
     domain_info: null,
+    serp_info: null,
     permutations_tried: 0,
     cost_usd: 0,
     duration_ms: 0,
@@ -171,6 +173,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
 
   let serpPatterns: { pattern: string; count: number; examples: string[] }[] = [];
   let serpDirectMatch: string | null = null;
+  const serpUsed = !!config.serper_api_key;
 
   if (serpResult.emails.length > 0) {
     serpPatterns = identifyPatternsFromEmails(serpResult.emails);
@@ -210,6 +213,14 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
 
   permutations = permutations.slice(0, config.max_permutations_to_try);
 
+  // Build SERP tracing info for the response
+  const serpInfo: SerpInfo = {
+    used: serpUsed,
+    emails_found: serpResult.emails.length,
+    patterns_detected: serpPatterns,
+    direct_match: serpDirectMatch,
+  };
+
   // ── 6. Cache check ──
   for (const email of permutations) {
     const cached = await getCachedVerification(email);
@@ -222,6 +233,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
         method: cached.method,
         pattern,
         domain_info: domainInfo,
+        serp_info: serpInfo,
         permutations_tried: 0,
         cost_usd: totalCost,
         duration_ms: Date.now() - start,
@@ -246,10 +258,11 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
       return makeResult({
         email: serpDirectMatch,
         status: EmailStatus.valid,
-        confidence: 0.99, // SERP match + API validation = very high confidence
+        confidence: 0.99,
         method: VerificationMethod.serp_pattern,
         pattern,
         domain_info: domainInfo,
+        serp_info: serpInfo,
         permutations_tried: permutationsTried,
         cost_usd: totalCost,
         duration_ms: Date.now() - start,
@@ -270,6 +283,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
         method: VerificationMethod.serp_pattern,
         pattern,
         domain_info: domainInfo,
+        serp_info: serpInfo,
         permutations_tried: permutationsTried,
         cost_usd: totalCost,
         duration_ms: Date.now() - start,
@@ -309,6 +323,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
           method: result.method,
           pattern,
           domain_info: domainInfo,
+          serp_info: serpInfo,
           permutations_tried: permutationsTried,
           cost_usd: totalCost,
           duration_ms: Date.now() - start,
@@ -333,6 +348,7 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
           method: serpBoost ? VerificationMethod.serp_pattern : result.method,
           pattern,
           domain_info: domainInfo,
+          serp_info: serpInfo,
         });
       }
 
@@ -362,13 +378,14 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
   // ── 8. Return best available ──
   if (riskyCandidate) {
     await logSearch(first, last, domain, riskyCandidate.email, "risky", riskyCandidate.method, permutationsTried, apiCalls, totalCost, Date.now() - start);
-    return { ...riskyCandidate, duration_ms: Date.now() - start, cost_usd: totalCost };
+    return { ...riskyCandidate, serp_info: serpInfo, duration_ms: Date.now() - start, cost_usd: totalCost };
   }
 
   await logSearch(first, last, domain, null, "unknown", null, permutationsTried, apiCalls, totalCost, Date.now() - start);
   return makeResult({
     status: EmailStatus.unknown,
     domain_info: domainInfo,
+    serp_info: serpInfo,
     permutations_tried: permutationsTried,
     cost_usd: totalCost,
     duration_ms: Date.now() - start,

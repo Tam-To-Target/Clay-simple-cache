@@ -23,6 +23,7 @@ export class DebounceProvider implements EmailVerificationProvider {
       method: this.method,
       pattern: null,
       domain_info: null,
+      serp_info: null,
       permutations_tried: 0,
       cost_usd: 0,
       duration_ms: 0,

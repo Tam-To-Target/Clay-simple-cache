@@ -35,6 +35,7 @@ export const emailFinderController = {
         method: result.method,
         pattern: result.pattern,
         domain_info: result.domain_info,
+        serp_info: result.serp_info,
         permutations_tried: result.permutations_tried,
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
