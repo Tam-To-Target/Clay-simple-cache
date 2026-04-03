@@ -16,6 +16,7 @@ export enum VerificationMethod {
   debounce = "debounce",
   bouncer = "bouncer",
   neverbounce = "neverbounce",
+  serp_pattern = "serp_pattern",
 }
 
 export enum ProviderType {

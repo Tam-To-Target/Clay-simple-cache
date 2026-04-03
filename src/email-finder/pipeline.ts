@@ -21,6 +21,10 @@ import { getCachedVerification, cacheVerification } from "./cache";
 import { saveDomainPattern, getDomainPatterns } from "./pattern-learner";
 import { EmailListVerifyProvider } from "./providers/emaillistverify";
 import { DebounceProvider } from "./providers/debounce";
+import {
+  searchSerpForEmails,
+  identifyPatternsFromEmails,
+} from "./providers/serper";
 
 function makeResult(partial: Partial<VerificationResult>): VerificationResult {
   return {
@@ -155,9 +159,55 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     }
   }
 
-  // Apply known domain patterns
+  // Apply known domain patterns (from DB)
   const knownPatterns = await getDomainPatterns(domain);
   permutations = prioritizePermutations(permutations, knownPatterns);
+
+  // ── 5b. SERP pattern discovery ──
+  // Search Google for "@domain.com" to find real emails and identify the domain's pattern.
+  // This runs before API validation to inform permutation priority.
+  const serpResult = await searchSerpForEmails(domain);
+  totalCost += serpResult.cost_usd;
+
+  let serpPatterns: { pattern: string; count: number; examples: string[] }[] = [];
+  let serpDirectMatch: string | null = null;
+
+  if (serpResult.emails.length > 0) {
+    serpPatterns = identifyPatternsFromEmails(serpResult.emails);
+
+    // Check if any SERP email is an exact match for our target person
+    for (const serpEmail of serpResult.emails) {
+      if (permutations.includes(serpEmail)) {
+        serpDirectMatch = serpEmail;
+        break;
+      }
+    }
+
+    // Re-prioritize permutations based on SERP-discovered patterns
+    if (serpPatterns.length > 0) {
+      const serpKnownPatterns = serpPatterns.map((sp) => ({
+        pattern: sp.pattern,
+        confidence: Math.min(1.0, 0.7 + sp.count * 0.1),
+        sample_count: sp.count,
+      }));
+
+      // Merge SERP patterns with DB patterns (SERP takes priority for ordering)
+      const mergedPatterns = [...serpKnownPatterns];
+      for (const dbp of knownPatterns) {
+        if (!mergedPatterns.find((p) => p.pattern === dbp.pattern)) {
+          mergedPatterns.push(dbp);
+        }
+      }
+
+      permutations = prioritizePermutations(permutations, mergedPatterns);
+
+      // Save SERP-discovered patterns to DB for future lookups
+      for (const sp of serpPatterns) {
+        await saveDomainPattern(domain, sp.pattern);
+      }
+    }
+  }
+
   permutations = permutations.slice(0, config.max_permutations_to_try);
 
   // ── 6. Cache check ──
@@ -173,15 +223,64 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
         pattern,
         domain_info: domainInfo,
         permutations_tried: 0,
-        cost_usd: 0,
+        cost_usd: totalCost,
         duration_ms: Date.now() - start,
       });
     }
   }
 
+  // ── 6b. SERP direct match shortcut ──
+  // If SERP found an exact email matching one of our permutations,
+  // validate it directly first (single API call instead of batch scanning).
+  if (serpDirectMatch) {
+    const validation = await apiCascade(serpDirectMatch, maxTier);
+    permutationsTried++;
+    apiCalls++;
+    totalCost += validation.cost_usd;
+
+    if (validation.status === EmailStatus.valid) {
+      const pattern = identifyPattern(serpDirectMatch, first, last);
+      if (pattern) await saveDomainPattern(domain, pattern);
+      await cacheVerification(serpDirectMatch, "valid", 0.99, VerificationMethod.serp_pattern);
+      await logSearch(first, last, domain, serpDirectMatch, "valid", VerificationMethod.serp_pattern, permutationsTried, apiCalls, totalCost, Date.now() - start);
+      return makeResult({
+        email: serpDirectMatch,
+        status: EmailStatus.valid,
+        confidence: 0.99, // SERP match + API validation = very high confidence
+        method: VerificationMethod.serp_pattern,
+        pattern,
+        domain_info: domainInfo,
+        permutations_tried: permutationsTried,
+        cost_usd: totalCost,
+        duration_ms: Date.now() - start,
+      });
+    }
+
+    // If catch-all, the SERP match is still our best guess — handle below
+    if (validation.status === EmailStatus.catch_all) {
+      const pattern = identifyPattern(serpDirectMatch, first, last);
+      // SERP found this email publicly + domain is catch-all = high confidence
+      const confidence = 0.85;
+      await cacheVerification(serpDirectMatch, "catch_all", confidence, VerificationMethod.serp_pattern);
+      await logSearch(first, last, domain, serpDirectMatch, "catch_all", VerificationMethod.serp_pattern, permutationsTried, apiCalls, totalCost, Date.now() - start);
+      return makeResult({
+        email: serpDirectMatch,
+        status: EmailStatus.catch_all,
+        confidence,
+        method: VerificationMethod.serp_pattern,
+        pattern,
+        domain_info: domainInfo,
+        permutations_tried: permutationsTried,
+        cost_usd: totalCost,
+        duration_ms: Date.now() - start,
+      });
+    }
+
+    // Remove from permutations list so we don't re-test it
+    permutations = permutations.filter((p) => p !== serpDirectMatch);
+  }
+
   // ── 7. API cascade with parallelization ──
-  // Strategy: verify in parallel batches for speed.
-  // Each batch fires all calls simultaneously, then we scan results for a winner.
   let riskyCandidate: VerificationResult | null = null;
   let catchAllCandidate: VerificationResult | null = null;
   const BATCH_SIZE = 5;
@@ -190,12 +289,10 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
     const batch = permutations.slice(i, i + BATCH_SIZE);
     const results = await apiCascadeParallel(batch, maxTier, BATCH_SIZE);
 
-    // Count the whole batch as tried (they all ran in parallel)
     permutationsTried += batch.length;
     apiCalls += batch.length;
     for (const r of results) totalCost += r.cost_usd;
 
-    // Scan batch results: valid wins immediately, catch_all/risky are saved, invalid is skipped
     for (let j = 0; j < results.length; j++) {
       const result = results[j];
       const email = batch[j];
@@ -219,12 +316,22 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
       }
 
       if (result.status === EmailStatus.catch_all && !catchAllCandidate) {
+        // For catch-all: use SERP pattern if available, otherwise first permutation
+        const bestEmail = pickBestCatchAllEmail(
+          permutations, first, last, domain, serpPatterns
+        );
+        const pattern = identifyPattern(bestEmail, first, last);
+        // Confidence: higher if SERP corroborates the pattern
+        const serpBoost = serpPatterns.length > 0 && pattern &&
+          serpPatterns.some((sp) => sp.pattern === pattern);
+        const confidence = serpBoost ? 0.75 : 0.5;
+
         catchAllCandidate = makeResult({
-          email: permutations[0],
+          email: bestEmail,
           status: EmailStatus.catch_all,
-          confidence: 0.5,
-          method: result.method,
-          pattern: identifyPattern(permutations[0], first, last),
+          confidence,
+          method: serpBoost ? VerificationMethod.serp_pattern : result.method,
+          pattern,
           domain_info: domainInfo,
         });
       }
@@ -238,20 +345,17 @@ export async function findEmail(request: FindRequest): Promise<VerificationResul
           domain_info: domainInfo,
         });
       }
-
-      // invalid = this email doesn't exist, continue trying other permutations
     }
 
-    // If we got catch_all from this batch, no point trying more permutations
-    // (the whole domain accepts everything)
+    // If catch-all detected, validate best guess with Debounce for extra signal
     if (catchAllCandidate) {
-      await logSearch(first, last, domain, catchAllCandidate.email, "catch_all", catchAllCandidate.method, permutationsTried, apiCalls, totalCost, Date.now() - start);
-      return {
-        ...catchAllCandidate,
-        permutations_tried: permutationsTried,
-        cost_usd: totalCost,
-        duration_ms: Date.now() - start,
-      };
+      const finalResult = await validateCatchAllWithDebounce(
+        catchAllCandidate, permutationsTried, apiCalls, totalCost, start,
+        first, last, domain
+      );
+      totalCost = finalResult.cost_usd;
+      await logSearch(first, last, domain, finalResult.email, finalResult.status, finalResult.method, finalResult.permutations_tried, apiCalls, totalCost, Date.now() - start);
+      return finalResult;
     }
   }
 
@@ -339,6 +443,86 @@ export async function verifySingleEmail(
     cost_usd: result.cost_usd,
     duration_ms: Date.now() - start,
   });
+}
+
+/**
+ * For catch-all domains, pick the best email based on SERP-discovered patterns.
+ * If SERP found a pattern, use it to build the email. Otherwise fall back to first permutation.
+ */
+function pickBestCatchAllEmail(
+  permutations: string[],
+  first: string,
+  last: string,
+  domain: string,
+  serpPatterns: { pattern: string; count: number; examples: string[] }[]
+): string {
+  if (serpPatterns.length === 0 || permutations.length === 0) {
+    return permutations[0] || `${first}.${last}@${domain}`;
+  }
+
+  // The top SERP pattern is the most likely format for this domain
+  const topPattern = serpPatterns[0].pattern;
+
+  // Find the permutation that matches this pattern
+  for (const email of permutations) {
+    const pattern = identifyPattern(email, first, last);
+    if (pattern === topPattern) return email;
+  }
+
+  // Fallback to first permutation (already prioritized by patterns)
+  return permutations[0];
+}
+
+/**
+ * For catch-all domains: if Tier 1 (EmailListVerify) said catch-all,
+ * cross-validate with Debounce to see if it can give a more definitive answer.
+ * Debounce sometimes distinguishes valid from catch-all more accurately.
+ */
+async function validateCatchAllWithDebounce(
+  catchAllCandidate: VerificationResult,
+  permutationsTried: number,
+  apiCalls: number,
+  totalCost: number,
+  start: number,
+  first: string,
+  last: string,
+  domain: string
+): Promise<VerificationResult> {
+  const email = catchAllCandidate.email;
+  if (!email) return { ...catchAllCandidate, permutations_tried: permutationsTried, cost_usd: totalCost, duration_ms: Date.now() - start };
+
+  const debounce = new DebounceProvider();
+  if (!debounce.is_configured()) {
+    return { ...catchAllCandidate, permutations_tried: permutationsTried, cost_usd: totalCost, duration_ms: Date.now() - start };
+  }
+
+  const debounceResult = await debounce.verify(email);
+  totalCost += debounceResult.cost_usd;
+
+  // If Debounce says "safe to send" (valid), upgrade confidence
+  if (debounceResult.status === EmailStatus.valid) {
+    const pattern = identifyPattern(email, first, last);
+    await cacheVerification(email, "valid", 0.9, VerificationMethod.debounce);
+    return makeResult({
+      email,
+      status: EmailStatus.valid,
+      confidence: 0.9, // Debounce confirmed valid on a catch-all domain
+      method: VerificationMethod.debounce,
+      pattern,
+      domain_info: catchAllCandidate.domain_info,
+      permutations_tried: permutationsTried,
+      cost_usd: totalCost,
+      duration_ms: Date.now() - start,
+    });
+  }
+
+  // If Debounce also says catch-all, keep our best guess but note the SERP confidence
+  return {
+    ...catchAllCandidate,
+    permutations_tried: permutationsTried,
+    cost_usd: totalCost,
+    duration_ms: Date.now() - start,
+  };
 }
 
 async function logSearch(
