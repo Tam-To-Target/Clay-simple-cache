@@ -11,7 +11,10 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
   - Resolution: Domain > LinkedIn.
 - **Email Finder**:
   - Given a name + domain, generates email permutations (15 patterns, LATAM-aware).
+  - SERP-based pattern discovery: searches Google for `"@domain.com"` to find real emails and identify the domain's pattern before brute-forcing.
+  - Cross-references multiple SERP emails to resolve ambiguous patterns (flast vs lastf, etc.).
   - Multi-tier API verification cascade (EmailListVerify, DeBounce).
+  - Smart catch-all handling: uses SERP patterns + Debounce cross-validation instead of blind guessing.
   - Domain intelligence: MX lookup, provider detection, disposable/free checks.
   - Pattern learning: remembers verified patterns per domain for faster future lookups.
   - Verification caching (30 days) and domain intel caching (7 days).
@@ -37,6 +40,7 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
    - `API_KEY`: Bearer token for authentication
    - `DATABASE_URL`: Connection Pool URL (Transaction Mode, Port 6543)
    - `DIRECT_URL`: Direct Connection URL (Session Mode, Port 5432)
+   - `SERPER_API_KEY`: SERP pattern discovery (google.serper.dev)
    - `EMAILLISTVERIFY_API_KEY`: Tier 1 verification provider
    - `DEBOUNCE_API_KEY`: Tier 2 verification provider
 
@@ -93,6 +97,29 @@ curl -X POST http://localhost:3000/verify \
   -H "Content-Type: application/json" \
   -d '{"email": "juan@empresa.com"}'
 ```
+
+## Email Finder — Cost per Lookup
+
+Each lookup runs through a pipeline with up to 3 paid services. Actual cost depends on how quickly a valid email is found.
+
+| Service | Cost per call | When it runs |
+|---|---|---|
+| Serper (SERP) | $0.001 | Always (1 search per domain) |
+| EmailListVerify (Tier 1) | $0.0004 / email | Each permutation tested |
+| Debounce (Tier 2) | $0.0015 / email | Cascade fallback or catch-all cross-validation |
+
+**Estimated cost by scenario:**
+
+| Scenario | Serper | ELV | Debounce | Total |
+|---|---|---|---|---|
+| Cache hit | — | — | — | **$0.000** |
+| SERP direct match (1 ELV call) | $0.001 | $0.0004 | — | **$0.0014** |
+| Found in 1st batch (5 perms) | $0.001 | $0.002 | — | **$0.003** |
+| Catch-all domain (1 batch + Debounce) | $0.001 | $0.002 | $0.0015 | **$0.0045** |
+| 2 batches, Tier 1 only | $0.001 | $0.004 | — | **$0.005** |
+| Worst case (15 perms, both tiers) | $0.001 | $0.006 | $0.0225 | **$0.0295** |
+
+**Typical cost: ~$0.003 per email** (SERP patterns prioritize the right permutation early).
 
 ## Pending / Roadmap
 - `POST /find/batch` — Batch email finding (array of contacts, background processing).
