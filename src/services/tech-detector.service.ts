@@ -427,18 +427,18 @@ const ECOMMERCE_PATTERNS: EcommercePattern[] = [
   {
     name: "Magento",
     patterns: [
-      // Universal Magento 2 fingerprint — present on ALL themes (Luma, Hyva, Blank, etc.)
-      new RegExp(`/static/version\\d+/frontend/`, "i"),
-      // Classic Magento 2 Luma/Blank theme paths
+      // Universal Magento 2 static asset versioning — present on ALL themes
+      new RegExp(`/static/version\\d+/`, "i"),
+      // Classic Magento 2 theme paths (Luma/Blank)
       new RegExp(`/static/frontend/Magento`, "i"),
       // Magento JS component system
       new RegExp(`data-mage-init`, "i"),
       new RegExp(`x-magento-init`, "i"),
       new RegExp(`requirejs-min-resolver`, "i"),
-      // Magento module names in script paths
-      new RegExp(`Magento_Checkout`, "i"),
-      new RegExp(`Magento_Ui`, "i"),
-      new RegExp(`Magento_Theme`, "i"),
+      // Any Magento module name in requirejs paths (Banner, Catalog, Checkout, Ui, etc.)
+      new RegExp(`Magento_[A-Za-z]`, ""),
+      // Magento Storefront Events SDK
+      new RegExp(`magentoStorefrontEvent`, "i"),
       // Magento requirejs bootstrap
       new RegExp(`mage/bootstrap`, "i"),
       new RegExp(`mage/cookies`, "i"),
