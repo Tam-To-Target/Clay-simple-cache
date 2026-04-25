@@ -331,14 +331,6 @@ const CMS_PATTERNS: CmsPattern[] = [
     versionPattern: new RegExp(`content=["']WordPress\\s+([\\d.]+)`, "i"),
   },
   {
-    name: "Shopify",
-    patterns: [
-      new RegExp(`cdn\\.shopify\\.com`, "i"),
-      new RegExp(`Shopify\\.theme`, "i"),
-      new RegExp(`myshopify\\.com`, "i"),
-    ],
-  },
-  {
     name: "Wix",
     patterns: [
       new RegExp(`static\\.wixstatic\\.com`, "i"),
