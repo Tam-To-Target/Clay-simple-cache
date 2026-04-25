@@ -419,17 +419,29 @@ const ECOMMERCE_PATTERNS: EcommercePattern[] = [
     patterns: [
       new RegExp(`woocommerce`, "i"),
       new RegExp(`wc-add-to-cart`, "i"),
+      new RegExp(`wc-ajax`, "i"),
+      new RegExp(`wp-json/wc/`, "i"),
     ],
   },
   {
     name: "Shopify",
-    patterns: [new RegExp(`cdn\\.shopify\\.com`, "i")],
+    patterns: [
+      new RegExp(`cdn\\.shopify\\.com`, "i"),
+      new RegExp(`myshopify\\.com`, "i"),
+      new RegExp(`Shopify\\.theme`, "i"),
+      new RegExp(`shopify-section`, "i"),
+    ],
   },
   {
-    name: "Tiendanube",
+    name: "Magento",
     patterns: [
-      new RegExp(`tiendanube\\.com`, "i"),
-      new RegExp(`nuvemshop\\.com`, "i"),
+      new RegExp(`/static/frontend/Magento`, "i"),
+      new RegExp(`mage/bootstrap`, "i"),
+      new RegExp(`data-mage-init`, "i"),
+      new RegExp(`Magento_Checkout`, "i"),
+      new RegExp(`Magento_Ui`, "i"),
+      new RegExp(`mage/cookies`, "i"),
+      new RegExp(`/mage/`, "i"),
     ],
   },
   {
@@ -437,6 +449,89 @@ const ECOMMERCE_PATTERNS: EcommercePattern[] = [
     patterns: [
       new RegExp(`vtex\\.com`, "i"),
       new RegExp(`vteximg\\.com`, "i"),
+      new RegExp(`vtexassets\\.com`, "i"),
+      new RegExp(`vtexcommerce\\.com\\.br`, "i"),
+      new RegExp(`io\\.vtex\\.com`, "i"),
+      new RegExp(`checkout\\.vtex\\.com`, "i"),
+      new RegExp(`/__vtex_apm`, "i"),
+    ],
+  },
+  {
+    name: "Tiendanube",
+    patterns: [
+      new RegExp(`tiendanube\\.com`, "i"),
+      new RegExp(`nuvemshop\\.com`, "i"),
+      new RegExp(`lojavirtualnuvem\\.com\\.br`, "i"),
+      new RegExp(`cdn\\.nuvemshop\\.com\\.br`, "i"),
+    ],
+  },
+  {
+    name: "Salesforce Commerce Cloud",
+    patterns: [
+      new RegExp(`demandware\\.net`, "i"),
+      new RegExp(`demandware\\.edgesuite\\.net`, "i"),
+      new RegExp(`/on/demandware\\.store/`, "i"),
+      new RegExp(`dw_csrftoken`, "i"),
+      new RegExp(`dwanonymous_`, "i"),
+    ],
+  },
+  {
+    name: "BigCommerce",
+    patterns: [
+      new RegExp(`cdn11\\.bigcommerce\\.com`, "i"),
+      new RegExp(`bigcommerce\\.com`, "i"),
+      new RegExp(`stencil\\.bigcommerce`, "i"),
+    ],
+  },
+  {
+    name: "PrestaShop",
+    patterns: [
+      new RegExp(`/modules/prestashop`, "i"),
+      new RegExp(`prestashop`, "i"),
+      new RegExp(`presta_shop`, "i"),
+    ],
+  },
+  {
+    name: "SAP Hybris",
+    patterns: [
+      new RegExp(`acceleratorstorefronts`, "i"),
+      new RegExp(`hybris`, "i"),
+      new RegExp(`/yacceleratorstorefront/`, "i"),
+    ],
+  },
+  {
+    name: "Shopware",
+    patterns: [
+      new RegExp(`shopware`, "i"),
+      new RegExp(`sw-plugin-dev`, "i"),
+    ],
+  },
+  {
+    name: "OpenCart",
+    patterns: [
+      new RegExp(`catalog/view/javascript`, "i"),
+      new RegExp(`route=common/home`, "i"),
+    ],
+  },
+  {
+    name: "Ecwid",
+    patterns: [
+      new RegExp(`app\\.ecwid\\.com`, "i"),
+      new RegExp(`ecwid\\.com/script\\.js`, "i"),
+    ],
+  },
+  {
+    name: "Linx Commerce",
+    patterns: [
+      new RegExp(`linxcommerce\\.com`, "i"),
+      new RegExp(`linximpulse\\.com`, "i"),
+    ],
+  },
+  {
+    name: "TRAY Commerce",
+    patterns: [
+      new RegExp(`tray\\.com\\.br`, "i"),
+      new RegExp(`static\\.tray\\.com\\.br`, "i"),
     ],
   },
 ];
@@ -578,10 +673,10 @@ export async function detectTechnologies(url: string): Promise<TechResult> {
     }
   }
 
-  // Build flat technologies string
+  // Build flat technologies string — ecommerce first, then cms (if different), then rest
   const parts: string[] = [];
-  if (cms) parts.push(cms);
   if (ecommerce) parts.push(ecommerce);
+  if (cms && cms !== ecommerce) parts.push(cms);
   for (const cat of [
     "analytics",
     "tag_managers",
