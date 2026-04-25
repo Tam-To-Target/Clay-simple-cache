@@ -9,14 +9,18 @@ export const techDetectorController = {
         res.status(400).json({ error: "url is required" });
         return;
       }
-      // Basic URL validation
+      // Normalize URL — prepend https:// if no protocol given
+      let normalizedUrl = url.trim();
+      if (!/^https?:\/\//i.test(normalizedUrl)) {
+        normalizedUrl = `https://${normalizedUrl}`;
+      }
       try {
-        new URL(url);
+        new URL(normalizedUrl);
       } catch {
         res.status(400).json({ error: "Invalid URL format" });
         return;
       }
-      const result = await detectTechnologies(url);
+      const result = await detectTechnologies(normalizedUrl);
       res.json({ success: true, url, ...result });
     } catch (error: any) {
       if (error.message?.includes("Timeout")) {

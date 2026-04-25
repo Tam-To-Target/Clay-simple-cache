@@ -380,7 +380,7 @@ describe("API Integration Tests", () => {
       const res = await request(app)
         .post("/detect-tech")
         .set("Authorization", `Bearer ${API_KEY}`)
-        .send({ url: "not-a-url" });
+        .send({ url: "://invalid url with spaces" });
       expect(res.status).toBe(400);
       expect(res.body.error).toContain("Invalid URL format");
     });
