@@ -583,8 +583,52 @@ function extractMeta(html: string): Record<string, string>[] {
   return results;
 }
 
+export type FetchFailReason =
+  | "blocked_by_site"
+  | "rate_limited_by_site"
+  | "site_unavailable"
+  | "domain_not_found"
+  | "ssl_error"
+  | "timeout"
+  | "network_error";
+
+export class FetchFailError extends Error {
+  constructor(
+    public readonly reason: FetchFailReason,
+    public readonly httpStatus?: number,
+    message?: string
+  ) {
+    super(message ?? reason);
+    this.name = "FetchFailError";
+  }
+}
+
+function classifyNetworkError(error: any): FetchFailError {
+  const cause = error?.cause;
+  const code: string = cause?.code ?? "";
+  const msg: string = (cause?.message ?? error?.message ?? "").toLowerCase();
+
+  if (code === "ENOTFOUND" || msg.includes("getaddrinfo") || msg.includes("enotfound")) {
+    return new FetchFailError("domain_not_found", undefined, "DNS: domain not found");
+  }
+  if (code === "ECONNREFUSED" || msg.includes("econnrefused")) {
+    return new FetchFailError("site_unavailable", undefined, "Connection refused");
+  }
+  if (code === "ECONNRESET" || msg.includes("econnreset")) {
+    return new FetchFailError("network_error", undefined, "Connection reset");
+  }
+  if (
+    msg.includes("certificate") || msg.includes("ssl") ||
+    msg.includes("cert") || code.startsWith("CERT_") ||
+    code.startsWith("SSL_") || code === "SELF_SIGNED_CERT_IN_CHAIN" ||
+    code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+  ) {
+    return new FetchFailError("ssl_error", undefined, "SSL/certificate error");
+  }
+  return new FetchFailError("network_error", undefined, error?.message ?? "Network error");
+}
+
 export async function detectTechnologies(url: string): Promise<TechResult> {
-  // Validate URL
   try {
     new URL(url);
   } catch {
@@ -609,15 +653,26 @@ export async function detectTechnologies(url: string): Promise<TechResult> {
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status} desde la URL`);
+      const status = response.status;
+      if (status === 429) {
+        throw new FetchFailError("rate_limited_by_site", status, `Site returned 429 Too Many Requests`);
+      }
+      if (status === 401 || status === 403 || status === 406 || status === 407) {
+        throw new FetchFailError("blocked_by_site", status, `Site blocked the request (HTTP ${status})`);
+      }
+      if (status >= 500) {
+        throw new FetchFailError("site_unavailable", status, `Site returned HTTP ${status}`);
+      }
+      throw new FetchFailError("network_error", status, `HTTP ${status} from target URL`);
     }
 
     html = await response.text();
   } catch (error: any) {
+    if (error instanceof FetchFailError) throw error;
     if (error.name === "AbortError") {
-      throw new Error("Timeout al obtener la URL");
+      throw new FetchFailError("timeout", undefined, "Request timed out after 15s");
     }
-    throw error;
+    throw classifyNetworkError(error);
   } finally {
     clearTimeout(timeoutId);
   }

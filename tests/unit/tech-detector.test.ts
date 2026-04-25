@@ -201,15 +201,42 @@ describe("detectTechnologies", () => {
   });
 
   describe("Error handling", () => {
-    it("throws 'Timeout al obtener la URL' when fetch throws AbortError", async () => {
+    it("throws FetchFailError with reason=timeout on AbortError", async () => {
       const abortError = new DOMException("Aborted", "AbortError");
       vi.stubGlobal("fetch", vi.fn().mockRejectedValue(abortError));
-      await expect(detectTechnologies("https://example.com")).rejects.toThrow("Timeout al obtener la URL");
+      await expect(detectTechnologies("https://example.com")).rejects.toMatchObject({
+        name: "FetchFailError",
+        reason: "timeout",
+      });
     });
 
-    it("throws 'HTTP 403 desde la URL' when response status is 403", async () => {
+    it("throws FetchFailError with reason=blocked_by_site on HTTP 403", async () => {
       vi.stubGlobal("fetch", makeMockFetch("Forbidden", 403));
-      await expect(detectTechnologies("https://example.com")).rejects.toThrow("HTTP 403 desde la URL");
+      await expect(detectTechnologies("https://example.com")).rejects.toMatchObject({
+        name: "FetchFailError",
+        reason: "blocked_by_site",
+        httpStatus: 403,
+      });
+    });
+
+    it("throws FetchFailError with reason=rate_limited_by_site on HTTP 429", async () => {
+      vi.stubGlobal("fetch", makeMockFetch("Too Many Requests", 429));
+      await expect(detectTechnologies("https://example.com")).rejects.toMatchObject({
+        name: "FetchFailError",
+        reason: "rate_limited_by_site",
+        httpStatus: 429,
+      });
+    });
+
+    it("throws FetchFailError with reason=domain_not_found on ENOTFOUND", async () => {
+      const dnsError = Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("getaddrinfo ENOTFOUND example.invalid"), { code: "ENOTFOUND" }),
+      });
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(dnsError));
+      await expect(detectTechnologies("https://example.invalid")).rejects.toMatchObject({
+        name: "FetchFailError",
+        reason: "domain_not_found",
+      });
     });
 
     it("throws 'URL inválida' when an invalid URL is passed", async () => {

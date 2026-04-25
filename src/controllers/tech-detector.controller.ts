@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { detectTechnologies } from "../services/tech-detector.service";
+import { detectTechnologies, FetchFailError } from "../services/tech-detector.service";
 
 export const techDetectorController = {
   async detect(req: Request, res: Response) {
@@ -9,7 +9,6 @@ export const techDetectorController = {
         res.status(400).json({ error: "url is required" });
         return;
       }
-      // Normalize URL — prepend https:// if no protocol given
       let normalizedUrl = url.trim();
       if (!/^https?:\/\//i.test(normalizedUrl)) {
         normalizedUrl = `https://${normalizedUrl}`;
@@ -21,15 +20,24 @@ export const techDetectorController = {
         return;
       }
       const result = await detectTechnologies(normalizedUrl);
-      res.json({ success: true, url, ...result });
+      res.json({ success: true, url: normalizedUrl, ...result });
     } catch (error: any) {
-      if (error.message?.includes("Timeout")) {
-        res.status(504).json({ error: error.message });
-      } else if (error.message?.includes("HTTP ")) {
-        res.status(502).json({ error: error.message });
-      } else {
-        res.status(500).json({ error: error.message || "Internal server error" });
+      if (error instanceof FetchFailError) {
+        // Fetch failures return 200 with success:false so pipelines can handle them gracefully
+        res.json({
+          success: false,
+          url: req.body?.url ?? "",
+          reason: error.reason,
+          ...(error.httpStatus !== undefined && { http_status: error.httpStatus }),
+          message: error.message,
+          technologies: "",
+          scripts: [],
+          links: [],
+          meta: [],
+        });
+        return;
       }
+      res.status(500).json({ error: error.message || "Internal server error" });
     }
   },
 };

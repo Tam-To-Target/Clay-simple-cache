@@ -2,9 +2,10 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vites
 import request from "supertest";
 
 // Mock Prisma for all integration tests
-vi.mock("../../src/services/tech-detector.service", () => ({
-  detectTechnologies: vi.fn(),
-}));
+vi.mock("../../src/services/tech-detector.service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/services/tech-detector.service")>();
+  return { ...actual, detectTechnologies: vi.fn() };
+});
 
 vi.mock("../../src/db/prisma", () => ({
   default: {
@@ -44,7 +45,7 @@ vi.mock("../../src/db/prisma", () => ({
 
 import app from "../../src/app";
 import prisma from "../../src/db/prisma";
-import { detectTechnologies } from "../../src/services/tech-detector.service";
+import { detectTechnologies, FetchFailError } from "../../src/services/tech-detector.service";
 
 const mockPrisma = prisma as any;
 const mockDetect = detectTechnologies as any;
@@ -408,28 +409,31 @@ describe("API Integration Tests", () => {
       expect(res.body.meta).toContainEqual({ name: "generator", content: "WordPress 6.4" });
     });
 
-    it("returns 504 when service throws a Timeout error", async () => {
-      mockDetect.mockRejectedValue(new Error("Timeout al obtener la URL"));
+    it("returns 200 with success:false and reason=timeout on FetchFailError timeout", async () => {
+      mockDetect.mockRejectedValue(new FetchFailError("timeout", undefined, "Request timed out after 15s"));
 
       const res = await request(app)
         .post("/detect-tech")
         .set("Authorization", `Bearer ${API_KEY}`)
         .send({ url: "https://example.com" });
 
-      expect(res.status).toBe(504);
-      expect(res.body.error).toContain("Timeout");
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(false);
+      expect(res.body.reason).toBe("timeout");
     });
 
-    it("returns 502 when service throws an HTTP error", async () => {
-      mockDetect.mockRejectedValue(new Error("HTTP 404 desde la URL"));
+    it("returns 200 with success:false and reason=blocked_by_site on FetchFailError blocked", async () => {
+      mockDetect.mockRejectedValue(new FetchFailError("blocked_by_site", 403, "Site blocked the request (HTTP 403)"));
 
       const res = await request(app)
         .post("/detect-tech")
         .set("Authorization", `Bearer ${API_KEY}`)
         .send({ url: "https://example.com" });
 
-      expect(res.status).toBe(502);
-      expect(res.body.error).toContain("HTTP 404");
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(false);
+      expect(res.body.reason).toBe("blocked_by_site");
+      expect(res.body.http_status).toBe(403);
     });
   });
 });
