@@ -32,17 +32,8 @@ export interface CompanyResolution {
 }
 
 export interface TechResult {
-    cms: string;
-    ecommerce: string;
-    analytics: string[];
-    tag_managers: string[];
-    frameworks: string[];
-    marketing: string[];
-    advertising: string[];
-    payments: string[];
-    cdn: string[];
-    seo: string[];
-    privacy: string[];
-    otros: string[];
-    resumen: string;
+    technologies: string;
+    scripts: string[];
+    links: string[];
+    meta: Record<string, string>[];
 }

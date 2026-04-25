@@ -387,19 +387,10 @@ describe("API Integration Tests", () => {
 
     it("returns 200 with full TechResult on success", async () => {
       const mockResult = {
-        cms: "WordPress",
-        ecommerce: "",
-        analytics: ["Google Analytics (GA4)"],
-        tag_managers: ["Google Tag Manager"],
-        frameworks: [],
-        marketing: [],
-        advertising: [],
-        payments: [],
-        cdn: [],
-        seo: [],
-        privacy: [],
-        otros: [],
-        resumen: "WordPress | Google Analytics (GA4) | Google Tag Manager",
+        technologies: "WordPress 6.4, Google Tag Manager",
+        scripts: ["https://googletagmanager.com/gtm.js?id=GTM-XXX"],
+        links: [],
+        meta: [{ name: "generator", content: "WordPress 6.4" }],
       };
       mockDetect.mockResolvedValue(mockResult);
 
@@ -411,9 +402,10 @@ describe("API Integration Tests", () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.url).toBe("https://example.com");
-      expect(res.body.cms).toBe("WordPress");
-      expect(res.body.analytics).toContain("Google Analytics (GA4)");
-      expect(res.body.resumen).toBe("WordPress | Google Analytics (GA4) | Google Tag Manager");
+      expect(res.body.technologies).toBe("WordPress 6.4, Google Tag Manager");
+      expect(res.body.scripts).toContain("https://googletagmanager.com/gtm.js?id=GTM-XXX");
+      expect(res.body.links).toEqual([]);
+      expect(res.body.meta).toContainEqual({ name: "generator", content: "WordPress 6.4" });
     });
 
     it("returns 504 when service throws a Timeout error", async () => {

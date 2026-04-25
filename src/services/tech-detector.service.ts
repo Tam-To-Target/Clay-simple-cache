@@ -3,7 +3,7 @@ import { TechResult } from "../types";
 interface TrackingPattern {
   name: string;
   patterns: RegExp[];
-  category: keyof Omit<TechResult, "cms" | "ecommerce" | "frameworks" | "resumen">;
+  category: string;
 }
 
 interface CmsPattern {
@@ -441,6 +441,53 @@ const ECOMMERCE_PATTERNS: EcommercePattern[] = [
   },
 ];
 
+function extractScripts(html: string): string[] {
+  const results: string[] = [];
+  const re = /<script[^>]+src=["']([^"']+)["']/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const src = m[1].trim();
+    if (src) results.push(src);
+  }
+  return [...new Set(results)];
+}
+
+function extractLinks(html: string): string[] {
+  const results: string[] = [];
+  const re = /<link[^>]+href=["']([^"']+)["'][^>]*>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const full = m[0];
+    // skip rel="shortcut icon", rel="icon", rel="manifest", rel="canonical", rel="alternate"
+    if (/rel=["'](shortcut icon|icon|manifest|canonical|alternate)["']/i.test(full)) continue;
+    const href = m[1].trim();
+    if (href && href.startsWith('http')) results.push(href);
+  }
+  return [...new Set(results)];
+}
+
+function extractMeta(html: string): Record<string, string>[] {
+  const results: Record<string, string>[] = [];
+  const re = /<meta\s([^>]+)>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const attrs = m[1];
+    const contentMatch = /content=["']([^"']*)["']/i.exec(attrs);
+    if (!contentMatch) continue;
+    const content = contentMatch[1].trim();
+    if (!content) continue;
+
+    const nameMatch = /(?:^|\s)name=["']([^"']+)["']/i.exec(attrs);
+    const propMatch = /property=["']([^"']+)["']/i.exec(attrs);
+    const httpMatch = /http-equiv=["']([^"']+)["']/i.exec(attrs);
+
+    if (nameMatch) results.push({ name: nameMatch[1], content });
+    else if (propMatch) results.push({ property: propMatch[1], content });
+    else if (httpMatch) results.push({ 'http-equiv': httpMatch[1], content });
+  }
+  return results;
+}
+
 export async function detectTechnologies(url: string): Promise<TechResult> {
   // Validate URL
   try {
@@ -531,7 +578,7 @@ export async function detectTechnologies(url: string): Promise<TechResult> {
     }
   }
 
-  // Build resumen
+  // Build flat technologies string
   const parts: string[] = [];
   if (cms) parts.push(cms);
   if (ecommerce) parts.push(ecommerce);
@@ -548,21 +595,12 @@ export async function detectTechnologies(url: string): Promise<TechResult> {
   ]) {
     parts.push(...grouped[cat]);
   }
-  const resumen = parts.join(" | ");
+  const technologies = parts.join(", ");
 
   return {
-    cms,
-    ecommerce,
-    analytics: grouped["analytics"],
-    tag_managers: grouped["tag_managers"],
-    frameworks: [],
-    marketing: grouped["marketing"],
-    advertising: grouped["advertising"],
-    payments: grouped["payments"],
-    cdn: grouped["cdn"],
-    seo: grouped["seo"],
-    privacy: grouped["privacy"],
-    otros: grouped["otros"],
-    resumen,
+    technologies,
+    scripts: extractScripts(html),
+    links: extractLinks(html),
+    meta: extractMeta(html),
   };
 }
