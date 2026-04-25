@@ -19,6 +19,8 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
   - Pattern learning: remembers verified patterns per domain for faster future lookups.
   - Verification caching (30 days) and domain intel caching (7 days).
   - Parallel verification for speed (batches of 5 concurrent API calls).
+- **Tech Detector**:
+  - Given a URL, fetches its HTML and detects web technologies (CMS, ecommerce, analytics, tag managers, marketing tools, advertising pixels, payment integrations, CDN, SEO plugins, and privacy tools).
 - **Data Merging**: Merges JSON data safely.
 - **ORM**: Builds on **Prisma** + **Supabase** (PostgreSQL).
 
@@ -80,6 +82,9 @@ See full documentation at `GET /docs/api` or visit `http://localhost:3000/docs/a
   - `POST /verify`: Verify an existing email address.
   - `GET /stats`: Aggregate metrics for the email finder.
 
+- **Tech Detector**
+  - `POST /detect-tech`: Detect web technologies from a URL.
+
 ### Example: Find Email
 
 ```bash
@@ -97,6 +102,52 @@ curl -X POST http://localhost:3000/verify \
   -H "Content-Type: application/json" \
   -d '{"email": "juan@empresa.com"}'
 ```
+
+### Example: Detect Technologies
+
+```bash
+curl -X POST http://localhost:3000/detect-tech \
+  -H "Authorization: Bearer your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "url": "https://example.com",
+  "cms": "WordPress 6.4",
+  "ecommerce": "WooCommerce",
+  "analytics": ["Google Analytics (GA4)", "Facebook Pixel"],
+  "tag_managers": ["Google Tag Manager"],
+  "frameworks": [],
+  "marketing": ["HubSpot", "Intercom"],
+  "advertising": ["Google Ads", "LinkedIn Insight Tag"],
+  "payments": ["Stripe"],
+  "cdn": ["Cloudflare"],
+  "seo": ["Yoast SEO"],
+  "privacy": ["OneTrust"],
+  "otros": [],
+  "resumen": "WordPress 6.4 | WooCommerce | Google Analytics (GA4) | Facebook Pixel | Google Tag Manager | HubSpot | Intercom | Google Ads | LinkedIn Insight Tag | Stripe | Cloudflare | Yoast SEO | OneTrust"
+}
+```
+
+**Detected categories:**
+| Field | Description |
+|-------|-------------|
+| `cms` | CMS platform (WordPress, Shopify, Wix, Webflow, etc.) |
+| `ecommerce` | E-commerce platform (WooCommerce, Shopify, VTEX, Tiendanube) |
+| `analytics` | Analytics tools (GA4, Facebook Pixel, Hotjar, Mixpanel, etc.) |
+| `tag_managers` | Tag managers (Google Tag Manager) |
+| `frameworks` | JS frameworks (empty — no Wappalyzer integration) |
+| `marketing` | CRM & marketing tools (HubSpot, Intercom, Mailchimp, etc.) |
+| `advertising` | Ad pixels (Google Ads, LinkedIn, TikTok, Pinterest, etc.) |
+| `payments` | Payment integrations (Stripe, PayPal, MercadoPago) |
+| `cdn` | CDN providers (Cloudflare, jsDelivr, unpkg) |
+| `seo` | SEO plugins (Yoast SEO, RankMath) |
+| `privacy` | Consent tools (OneTrust, CookieBot) |
+| `resumen` | Human-readable summary of detected technologies |
 
 ## Email Finder — Cost per Lookup
 

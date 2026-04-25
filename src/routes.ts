@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { profilesController } from './controllers/profiles.controller';
 import { companiesController } from './controllers/companies.controller';
 import { emailFinderController } from './controllers/email-finder.controller';
+import { techDetectorController } from './controllers/tech-detector.controller';
 
 import { docsController } from './controllers/docs.controller';
 import { authMiddleware } from './middleware/auth.middleware';
@@ -20,6 +21,9 @@ router.get('/companies', authMiddleware, companiesController.get);
 router.post('/find', authMiddleware, emailFinderController.find);
 router.post('/verify', authMiddleware, emailFinderController.verify);
 router.get('/stats', authMiddleware, emailFinderController.stats);
+
+// Tech Detector
+router.post('/detect-tech', authMiddleware, techDetectorController.detect);
 
 router.get('/docs/api', docsController.get);
 

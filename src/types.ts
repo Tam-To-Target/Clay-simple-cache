@@ -30,3 +30,19 @@ export interface CompanyResolution {
     company_id?: string;
     company?: Company;
 }
+
+export interface TechResult {
+    cms: string;
+    ecommerce: string;
+    analytics: string[];
+    tag_managers: string[];
+    frameworks: string[];
+    marketing: string[];
+    advertising: string[];
+    payments: string[];
+    cdn: string[];
+    seo: string[];
+    privacy: string[];
+    otros: string[];
+    resumen: string;
+}

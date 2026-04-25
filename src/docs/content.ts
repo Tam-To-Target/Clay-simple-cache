@@ -263,6 +263,79 @@ Returns aggregate metrics for the email finder service.
 
 ---
 
+---
+
+## Tech Detector
+
+### 8. Detect Technologies
+**POST** \`/detect-tech\`
+
+Given a URL, fetches the page HTML and detects web technologies in use (analytics, CMS, payments, marketing tools, etc.) via regex pattern matching.
+
+**Authentication**: Required (Bearer token)
+
+**Request Body (JSON)**:
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`url\` | String | **Yes** | Full URL to inspect (e.g. "https://example.com"). |
+
+**Example**:
+\`\`\`bash
+curl -X POST -H "Authorization: Bearer your_secret_key" \\
+  -H "Content-Type: application/json" \\
+  -d '{"url": "https://example.com"}' \\
+  {{BASE_URL}}/detect-tech
+\`\`\`
+
+**Response (JSON)**:
+\`\`\`json
+{
+  "success": true,
+  "url": "https://example.com",
+  "cms": "WordPress 6.4",
+  "ecommerce": "WooCommerce",
+  "analytics": ["Google Analytics (GA4)", "Facebook Pixel", "Hotjar"],
+  "tag_managers": ["Google Tag Manager"],
+  "frameworks": [],
+  "marketing": ["HubSpot", "Intercom"],
+  "advertising": ["Google Ads", "LinkedIn Insight Tag"],
+  "payments": ["Stripe"],
+  "cdn": ["Cloudflare"],
+  "seo": ["Yoast SEO"],
+  "privacy": ["CookieBot"],
+  "otros": [],
+  "resumen": "WordPress 6.4 | WooCommerce | Google Analytics (GA4) | Facebook Pixel | ..."
+}
+\`\`\`
+
+**Response Fields**:
+| Field | Type | Description |
+|---|---|---|
+| \`cms\` | String | Detected CMS name (with version if available), or empty string. |
+| \`ecommerce\` | String | Detected e-commerce platform, or empty string. |
+| \`analytics\` | String[] | Analytics and tracking tools detected. |
+| \`tag_managers\` | String[] | Tag manager tools detected. |
+| \`frameworks\` | String[] | JS frameworks detected (always \`[]\` in current version). |
+| \`marketing\` | String[] | Marketing automation / chat / CRM tools detected. |
+| \`advertising\` | String[] | Paid advertising pixels detected. |
+| \`payments\` | String[] | Payment processors detected. |
+| \`cdn\` | String[] | CDN providers detected. |
+| \`seo\` | String[] | SEO plugins/tools detected. |
+| \`privacy\` | String[] | Cookie consent / privacy tools detected. |
+| \`otros\` | String[] | Any other detected technologies. |
+| \`resumen\` | String | All detected items joined with \` | \` as a single summary string. |
+
+**Error Responses**:
+| Status | Body | Reason |
+|---|---|---|
+| \`400\` | \`{ "error": "url is required" }\` | The \`url\` field is missing from the request body. |
+| \`400\` | \`{ "error": "Invalid URL format" }\` | The provided URL could not be parsed. |
+| \`502\` | \`{ "error": "HTTP {status} desde la URL" }\` | The target URL returned a non-2xx HTTP status. |
+| \`504\` | \`{ "error": "Timeout al obtener la URL" }\` | The request to the target URL timed out (15s limit). |
+| \`500\` | \`{ "error": "..." }\` | Unexpected server error. |
+
+---
+
 ### Pending (Not Yet Implemented)
 - **POST /find/batch** — Batch email finding (accepts array of contacts, processes in background).
 - **POST /verify/batch** — Batch email verification.

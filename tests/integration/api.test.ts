@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vites
 import request from "supertest";
 
 // Mock Prisma for all integration tests
+vi.mock("../../src/services/tech-detector.service", () => ({
+  detectTechnologies: vi.fn(),
+}));
+
 vi.mock("../../src/db/prisma", () => ({
   default: {
     profile: {
@@ -40,8 +44,10 @@ vi.mock("../../src/db/prisma", () => ({
 
 import app from "../../src/app";
 import prisma from "../../src/db/prisma";
+import { detectTechnologies } from "../../src/services/tech-detector.service";
 
 const mockPrisma = prisma as any;
+const mockDetect = detectTechnologies as any;
 
 const API_KEY = "test-integration-key";
 
@@ -346,6 +352,92 @@ describe("API Integration Tests", () => {
       const res = await request(app).get("/");
       expect(res.status).toBe(302);
       expect(res.headers.location).toBe("/docs/api");
+    });
+  });
+
+  describe("POST /detect-tech", () => {
+    beforeEach(() => {
+      mockDetect.mockReset();
+    });
+
+    it("returns 401 without auth header", async () => {
+      const res = await request(app)
+        .post("/detect-tech")
+        .send({ url: "https://example.com" });
+      expect(res.status).toBe(401);
+    });
+
+    it("returns 400 when url is missing", async () => {
+      const res = await request(app)
+        .post("/detect-tech")
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("url is required");
+    });
+
+    it("returns 400 for invalid URL format", async () => {
+      const res = await request(app)
+        .post("/detect-tech")
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .send({ url: "not-a-url" });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("Invalid URL format");
+    });
+
+    it("returns 200 with full TechResult on success", async () => {
+      const mockResult = {
+        cms: "WordPress",
+        ecommerce: "",
+        analytics: ["Google Analytics (GA4)"],
+        tag_managers: ["Google Tag Manager"],
+        frameworks: [],
+        marketing: [],
+        advertising: [],
+        payments: [],
+        cdn: [],
+        seo: [],
+        privacy: [],
+        otros: [],
+        resumen: "WordPress | Google Analytics (GA4) | Google Tag Manager",
+      };
+      mockDetect.mockResolvedValue(mockResult);
+
+      const res = await request(app)
+        .post("/detect-tech")
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .send({ url: "https://example.com" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.url).toBe("https://example.com");
+      expect(res.body.cms).toBe("WordPress");
+      expect(res.body.analytics).toContain("Google Analytics (GA4)");
+      expect(res.body.resumen).toBe("WordPress | Google Analytics (GA4) | Google Tag Manager");
+    });
+
+    it("returns 504 when service throws a Timeout error", async () => {
+      mockDetect.mockRejectedValue(new Error("Timeout al obtener la URL"));
+
+      const res = await request(app)
+        .post("/detect-tech")
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .send({ url: "https://example.com" });
+
+      expect(res.status).toBe(504);
+      expect(res.body.error).toContain("Timeout");
+    });
+
+    it("returns 502 when service throws an HTTP error", async () => {
+      mockDetect.mockRejectedValue(new Error("HTTP 404 desde la URL"));
+
+      const res = await request(app)
+        .post("/detect-tech")
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .send({ url: "https://example.com" });
+
+      expect(res.status).toBe(502);
+      expect(res.body.error).toContain("HTTP 404");
     });
   });
 });
