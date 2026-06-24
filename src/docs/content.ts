@@ -216,6 +216,35 @@ Returns aggregate metrics for the email verification cache.
 
 ---
 
+## LinkedIn Finder
+
+### 7. Find Company LinkedIn
+**POST** \`/find-linkedin\`
+
+Given a domain (or URL), finds the company's LinkedIn page via a SERP lookup (requires \`SERPER_API_KEY\`).
+
+**Request Body (JSON)**:
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`domain\` | String | **Yes** | Company domain or URL (e.g. "acme.com"). \`url\` is accepted as an alias. |
+
+**Response (JSON)**:
+\`\`\`json
+{
+  "success": true,
+  "input": "acme.com",
+  "domain": "acme.com",
+  "linkedin_url": "https://www.linkedin.com/company/acme",
+  "linkedin_slug": "acme",
+  "match_type": "domain_in_url",
+  "cost_usd": 0.001
+}
+\`\`\`
+
+If \`SERPER_API_KEY\` is not configured the endpoint returns \`503\` with \`reason: "missing_api_key"\`.
+
+---
+
 ## Do Not Contact (DNC)
 
 Multi-tenant suppression. Each **client** (identified by \`client_id\`) has its own
@@ -223,7 +252,7 @@ DNC list. Entries can match on **email**, **phone (E.164)**, or **domain**
 (domain entries block every contact at that company). DNC data is loaded from
 CSV uploads and from HubSpot lists (synced on a schedule).
 
-### 7. DNC Check
+### 8. DNC Check
 **POST** \`/dnc-check\`
 
 Check whether a contact is on a client's Do Not Contact list. If suppressed, the
@@ -272,7 +301,7 @@ data. If not suppressed, it returns the contact's cached profile data (if any).
 
 These endpoints manage clients and their DNC sources. All require the Bearer API key.
 
-### 8. Upsert Client
+### 9. Upsert Client
 **POST** \`/admin/clients\`
 
 Create or update a client (tenant), keyed by \`external_id\`.
@@ -285,12 +314,12 @@ Create or update a client (tenant), keyed by \`external_id\`.
 | \`hubspot_portal_id\` | String | No | HubSpot portal ID. |
 | \`hubspot_access_token\` | String | No | HubSpot private-app token (used to read lists). Never returned by the API. |
 
-### 9. Get Client
+### 10. Get Client
 **GET** \`/admin/clients/:external_id\`
 
 Returns the client and its DNC sources (with last-sync status). The HubSpot token is never included.
 
-### 10. Register DNC Source
+### 11. Register DNC Source
 **POST** \`/admin/dnc/sources\`
 
 | Field | Type | Required | Description |
@@ -301,7 +330,7 @@ Returns the client and its DNC sources (with last-sync status). The HubSpot toke
 | \`hubspot_list_id\` | String | Yes for \`hubspot_list\` | The HubSpot list to sync. |
 | \`active\` | Boolean | No | Defaults to true. |
 
-### 11. Import DNC (CSV)
+### 12. Import DNC (CSV)
 **POST** \`/admin/dnc/import\`
 
 Load DNC entries from a CSV string or an explicit entries array.
@@ -320,7 +349,7 @@ Load DNC entries from a CSV string or an explicit entries array.
 
 Response: \`{ "status": "ok", "source_id": "...", "mode": "replace", "imported": 120, "skipped": 3 }\`.
 
-### 12. Sync HubSpot Lists
+### 13. Sync HubSpot Lists
 **POST** \`/admin/dnc/sync\`
 
 Pulls current HubSpot list memberships into the DNC tables (full snapshot replace per list). Cron-friendly — wire a daily scheduler to this endpoint, or run \`npm run dnc:sync\`.
