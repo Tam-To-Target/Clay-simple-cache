@@ -1,12 +1,7 @@
-import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import request from "supertest";
 
 // Mock Prisma for all integration tests
-vi.mock("../../src/services/tech-detector.service", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/services/tech-detector.service")>();
-  return { ...actual, detectTechnologies: vi.fn() };
-});
-
 vi.mock("../../src/db/prisma", () => ({
   default: {
     profile: {
@@ -19,24 +14,14 @@ vi.mock("../../src/db/prisma", () => ({
       create: vi.fn(),
       update: vi.fn(),
     },
-    searchLog: {
-      count: vi.fn().mockResolvedValue(0),
-      aggregate: vi.fn().mockResolvedValue({ _sum: { cost_usd: 0 } }),
-      groupBy: vi.fn().mockResolvedValue([]),
-      create: vi.fn(),
-    },
     domainIntel: {
       count: vi.fn().mockResolvedValue(0),
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
-    domainPattern: {
-      count: vi.fn().mockResolvedValue(0),
-      findMany: vi.fn().mockResolvedValue([]),
-      findUnique: vi.fn(),
-      create: vi.fn(),
-    },
     verificationCache: {
+      count: vi.fn().mockResolvedValue(0),
+      groupBy: vi.fn().mockResolvedValue([]),
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
@@ -45,10 +30,8 @@ vi.mock("../../src/db/prisma", () => ({
 
 import app from "../../src/app";
 import prisma from "../../src/db/prisma";
-import { detectTechnologies, FetchFailError } from "../../src/services/tech-detector.service";
 
 const mockPrisma = prisma as any;
-const mockDetect = detectTechnologies as any;
 
 const API_KEY = "test-integration-key";
 
@@ -60,11 +43,9 @@ describe("API Integration Tests", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Reset default mocks
-    mockPrisma.searchLog.count.mockResolvedValue(0);
-    mockPrisma.searchLog.aggregate.mockResolvedValue({ _sum: { cost_usd: 0 } });
-    mockPrisma.searchLog.groupBy.mockResolvedValue([]);
+    mockPrisma.verificationCache.count.mockResolvedValue(0);
+    mockPrisma.verificationCache.groupBy.mockResolvedValue([]);
     mockPrisma.domainIntel.count.mockResolvedValue(0);
-    mockPrisma.domainPattern.count.mockResolvedValue(0);
   });
 
   describe("GET /health", () => {
@@ -286,26 +267,6 @@ describe("API Integration Tests", () => {
     });
   });
 
-  describe("POST /find", () => {
-    it("returns 400 when domain is missing", async () => {
-      const res = await request(app)
-        .post("/find")
-        .set("Authorization", `Bearer ${API_KEY}`)
-        .send({ first_name: "John" });
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("domain is required");
-    });
-
-    it("returns 400 when no name provided", async () => {
-      const res = await request(app)
-        .post("/find")
-        .set("Authorization", `Bearer ${API_KEY}`)
-        .send({ domain: "acme.com" });
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("first_name");
-    });
-  });
-
   describe("POST /verify", () => {
     it("returns 400 when email is missing", async () => {
       const res = await request(app)
@@ -318,33 +279,32 @@ describe("API Integration Tests", () => {
   });
 
   describe("GET /stats", () => {
-    it("returns stats with all fields", async () => {
+    it("returns cache stats with all fields", async () => {
       const res = await request(app)
         .get("/stats")
         .set("Authorization", `Bearer ${API_KEY}`);
 
       expect(res.status).toBe(200);
-      expect(res.body).toHaveProperty("total_searches");
-      expect(res.body).toHaveProperty("total_valid_found");
-      expect(res.body).toHaveProperty("success_rate");
+      expect(res.body).toHaveProperty("emails_cached");
+      expect(res.body).toHaveProperty("valid_cached");
+      expect(res.body).toHaveProperty("catch_all_cached");
       expect(res.body).toHaveProperty("methods_breakdown");
-      expect(res.body).toHaveProperty("total_cost_usd");
-      expect(res.body).toHaveProperty("avg_cost_per_email");
       expect(res.body).toHaveProperty("domains_in_cache");
-      expect(res.body).toHaveProperty("patterns_learned");
-      expect(res.body).toHaveProperty("catch_all_domains");
     });
 
-    it("calculates success_rate correctly", async () => {
-      mockPrisma.searchLog.count
-        .mockResolvedValueOnce(100) // total
-        .mockResolvedValueOnce(75); // valid
+    it("reports cached email counts", async () => {
+      mockPrisma.verificationCache.count
+        .mockResolvedValueOnce(100) // emails_cached
+        .mockResolvedValueOnce(75)  // valid_cached
+        .mockResolvedValueOnce(10); // catch_all_cached
 
       const res = await request(app)
         .get("/stats")
         .set("Authorization", `Bearer ${API_KEY}`);
 
-      expect(res.body.success_rate).toBe(0.75);
+      expect(res.body.emails_cached).toBe(100);
+      expect(res.body.valid_cached).toBe(75);
+      expect(res.body.catch_all_cached).toBe(10);
     });
   });
 
@@ -353,87 +313,6 @@ describe("API Integration Tests", () => {
       const res = await request(app).get("/");
       expect(res.status).toBe(302);
       expect(res.headers.location).toBe("/docs/api");
-    });
-  });
-
-  describe("POST /detect-tech", () => {
-    beforeEach(() => {
-      mockDetect.mockReset();
-    });
-
-    it("returns 401 without auth header", async () => {
-      const res = await request(app)
-        .post("/detect-tech")
-        .send({ url: "https://example.com" });
-      expect(res.status).toBe(401);
-    });
-
-    it("returns 400 when url is missing", async () => {
-      const res = await request(app)
-        .post("/detect-tech")
-        .set("Authorization", `Bearer ${API_KEY}`)
-        .send({});
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("url is required");
-    });
-
-    it("returns 400 for invalid URL format", async () => {
-      const res = await request(app)
-        .post("/detect-tech")
-        .set("Authorization", `Bearer ${API_KEY}`)
-        .send({ url: "://invalid url with spaces" });
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("Invalid URL format");
-    });
-
-    it("returns 200 with full TechResult on success", async () => {
-      const mockResult = {
-        technologies: "WordPress 6.4, Google Tag Manager",
-        scripts: ["https://googletagmanager.com/gtm.js?id=GTM-XXX"],
-        links: [],
-        meta: [{ name: "generator", content: "WordPress 6.4" }],
-      };
-      mockDetect.mockResolvedValue(mockResult);
-
-      const res = await request(app)
-        .post("/detect-tech")
-        .set("Authorization", `Bearer ${API_KEY}`)
-        .send({ url: "https://example.com" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.url).toBe("https://example.com");
-      expect(res.body.technologies).toBe("WordPress 6.4, Google Tag Manager");
-      expect(res.body.scripts).toContain("https://googletagmanager.com/gtm.js?id=GTM-XXX");
-      expect(res.body.links).toEqual([]);
-      expect(res.body.meta).toContainEqual({ name: "generator", content: "WordPress 6.4" });
-    });
-
-    it("returns 200 with success:false and reason=timeout on FetchFailError timeout", async () => {
-      mockDetect.mockRejectedValue(new FetchFailError("timeout", undefined, "Request timed out after 15s"));
-
-      const res = await request(app)
-        .post("/detect-tech")
-        .set("Authorization", `Bearer ${API_KEY}`)
-        .send({ url: "https://example.com" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(false);
-      expect(res.body.reason).toBe("timeout");
-    });
-
-    it("returns 200 with success:false and reason=blocked_by_site on FetchFailError blocked", async () => {
-      mockDetect.mockRejectedValue(new FetchFailError("blocked_by_site", 403, "Site blocked the request (HTTP 403)"));
-
-      const res = await request(app)
-        .post("/detect-tech")
-        .set("Authorization", `Bearer ${API_KEY}`)
-        .send({ url: "https://example.com" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(false);
-      expect(res.body.reason).toBe("blocked_by_site");
-      expect(res.body.http_status).toBe(403);
     });
   });
 });

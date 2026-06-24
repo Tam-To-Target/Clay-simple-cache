@@ -1,6 +1,6 @@
 # Identity Cache & Enrichment API
 
-Service to ingest, normalize, and enrich identity data (Profiles & Companies). It allows upserting records based on normalized keys and merging data into a unified record. Includes an **Email Finder** module for discovering and verifying professional email addresses.
+Service to ingest, normalize, and enrich identity data (Profiles & Companies). It allows upserting records based on normalized keys and merging data into a unified record. Includes an **Email Cache** module for verifying and caching professional email addresses.
 
 ## Features
 - **Profiles**:
@@ -9,18 +9,17 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
 - **Companies**:
   - Normalization: Domain (trim, lowercase, remove www/protocol), LinkedIn.
   - Resolution: Domain > LinkedIn.
-- **Email Finder**:
-  - Given a name + domain, generates email permutations (15 patterns, LATAM-aware).
-  - SERP-based pattern discovery: searches Google for `"@domain.com"` to find real emails and identify the domain's pattern before brute-forcing.
-  - Cross-references multiple SERP emails to resolve ambiguous patterns (flast vs lastf, etc.).
-  - Multi-tier API verification cascade (EmailListVerify, DeBounce).
-  - Smart catch-all handling: uses SERP patterns + Debounce cross-validation instead of blind guessing.
+- **Email Cache**:
+  - Verifies an email address through a multi-tier API cascade (EmailListVerify, DeBounce).
   - Domain intelligence: MX lookup, provider detection, disposable/free checks.
-  - Pattern learning: remembers verified patterns per domain for faster future lookups.
-  - Verification caching (30 days) and domain intel caching (7 days).
-  - Parallel verification for speed (batches of 5 concurrent API calls).
-- **Tech Detector**:
-  - Given a URL, fetches its HTML and detects web technologies (CMS, ecommerce, analytics, tag managers, marketing tools, advertising pixels, payment integrations, CDN, SEO plugins, and privacy tools).
+  - Verification caching (30 days) and domain intel caching (7 days) — repeat lookups are served from cache at zero cost.
+- **Do Not Contact (DNC)**:
+  - Multi-tenant suppression — each client (`client_id`) has its own DNC list.
+  - Matches on email, phone (E.164), or domain (domain entries block a whole company).
+  - DNC data sourced from CSV uploads and HubSpot lists; HubSpot lists are re-synced on a schedule.
+  - If a contact is suppressed, the check returns the reason/source and withholds contact data; otherwise it returns the contact's cached profile.
+- **LinkedIn Finder**:
+  - Given a domain, finds the company's LinkedIn page via SERP lookup.
 - **Data Merging**: Merges JSON data safely.
 - **ORM**: Builds on **Prisma** + **Supabase** (PostgreSQL).
 
@@ -36,15 +35,15 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
    ```bash
    cp .env.example .env
    ```
-   
+
    Required variables:
    - `PORT`: Server port (default 3000)
    - `API_KEY`: Bearer token for authentication
    - `DATABASE_URL`: Connection Pool URL (Transaction Mode, Port 6543)
    - `DIRECT_URL`: Direct Connection URL (Session Mode, Port 5432)
-   - `SERPER_API_KEY`: SERP pattern discovery (google.serper.dev)
    - `EMAILLISTVERIFY_API_KEY`: Tier 1 verification provider
    - `DEBOUNCE_API_KEY`: Tier 2 verification provider
+   - `SERPER_API_KEY`: SERP lookups for the LinkedIn finder (google.serper.dev)
 
 3. **Database Setup**:
    Push the schema to your database:
@@ -77,22 +76,34 @@ See full documentation at `GET /docs/api` or visit `http://localhost:3000/docs/a
   - `POST /companies`: Upsert/Enrich a company.
   - `GET /companies`: Query by `domain` or `linkedin`.
 
-- **Email Finder**
-  - `POST /find`: Find email by name + domain.
-  - `POST /verify`: Verify an existing email address.
-  - `GET /stats`: Aggregate metrics for the email finder.
+- **Email Cache**
+  - `POST /verify`: Verify an email address (cache-first, falls back to the API cascade).
+  - `GET /stats`: Aggregate metrics for the verification cache.
 
-- **Tech Detector**
-  - `POST /detect-tech`: Detect web technologies from a URL.
+- **LinkedIn Finder**
+  - `POST /find-linkedin`: Find a company's LinkedIn page by domain.
 
-### Example: Find Email
+- **Do Not Contact**
+  - `POST /dnc-check`: Check a contact against a client's DNC list.
+
+- **DNC Administration**
+  - `POST /admin/clients`: Upsert a client (tenant) + HubSpot credentials.
+  - `GET /admin/clients/:external_id`: Inspect a client and its DNC sources.
+  - `POST /admin/dnc/sources`: Register a DNC source (`csv` or `hubspot_list`).
+  - `POST /admin/dnc/import`: Import DNC entries from a CSV string or array.
+  - `POST /admin/dnc/sync`: Pull current HubSpot list memberships into the DNC tables.
+
+### Example: DNC Check
 
 ```bash
-curl -X POST http://localhost:3000/find \
+curl -X POST http://localhost:3000/dnc-check \
   -H "Authorization: Bearer your_api_key" \
   -H "Content-Type: application/json" \
-  -d '{"first_name": "Juan", "last_name": "Garcia", "domain": "empresa.com"}'
+  -d '{"client_id": "cust_123", "email": "juan@empresa.com"}'
 ```
+
+Suppressed → `{ "contactable": false, "status": "do_not_contact", "reason": "...", "matched_on": "email", "source": { ... } }`
+Allowed → `{ "contactable": true, "contact": { ...cached profile... } }`
 
 ### Example: Verify Email
 
@@ -103,77 +114,68 @@ curl -X POST http://localhost:3000/verify \
   -d '{"email": "juan@empresa.com"}'
 ```
 
-### Example: Detect Technologies
-
-```bash
-curl -X POST http://localhost:3000/detect-tech \
-  -H "Authorization: Bearer your_api_key" \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://example.com"}'
-```
-
 **Response:**
 ```json
 {
-  "success": true,
-  "url": "https://example.com",
-  "cms": "WordPress 6.4",
-  "ecommerce": "WooCommerce",
-  "analytics": ["Google Analytics (GA4)", "Facebook Pixel"],
-  "tag_managers": ["Google Tag Manager"],
-  "frameworks": [],
-  "marketing": ["HubSpot", "Intercom"],
-  "advertising": ["Google Ads", "LinkedIn Insight Tag"],
-  "payments": ["Stripe"],
-  "cdn": ["Cloudflare"],
-  "seo": ["Yoast SEO"],
-  "privacy": ["OneTrust"],
-  "otros": [],
-  "resumen": "WordPress 6.4 | WooCommerce | Google Analytics (GA4) | Facebook Pixel | Google Tag Manager | HubSpot | Intercom | Google Ads | LinkedIn Insight Tag | Stripe | Cloudflare | Yoast SEO | OneTrust"
+  "email": "juan@empresa.com",
+  "status": "valid",
+  "confidence": 0.95,
+  "method": "emaillistverify",
+  "domain_info": { "domain": "empresa.com", "has_mx": true, "provider": "google_workspace" },
+  "cost_usd": 0.0004,
+  "duration_ms": 450
 }
 ```
 
-**Detected categories:**
-| Field | Description |
-|-------|-------------|
-| `cms` | CMS platform (WordPress, Shopify, Wix, Webflow, etc.) |
-| `ecommerce` | E-commerce platform (WooCommerce, Shopify, VTEX, Tiendanube) |
-| `analytics` | Analytics tools (GA4, Facebook Pixel, Hotjar, Mixpanel, etc.) |
-| `tag_managers` | Tag managers (Google Tag Manager) |
-| `frameworks` | JS frameworks (empty — no Wappalyzer integration) |
-| `marketing` | CRM & marketing tools (HubSpot, Intercom, Mailchimp, etc.) |
-| `advertising` | Ad pixels (Google Ads, LinkedIn, TikTok, Pinterest, etc.) |
-| `payments` | Payment integrations (Stripe, PayPal, MercadoPago) |
-| `cdn` | CDN providers (Cloudflare, jsDelivr, unpkg) |
-| `seo` | SEO plugins (Yoast SEO, RankMath) |
-| `privacy` | Consent tools (OneTrust, CookieBot) |
-| `resumen` | Human-readable summary of detected technologies |
+**Possible `status` values**: `valid`, `invalid`, `catch_all`, `unknown`, `risky`, `disposable`, `no_mx`, `role_account`.
 
-## Email Finder — Cost per Lookup
+## Email Cache — Cost per Lookup
 
-Each lookup runs through a pipeline with up to 3 paid services. Actual cost depends on how quickly a valid email is found.
+Each verification runs through up to 2 paid services. A cache hit costs nothing.
 
 | Service | Cost per call | When it runs |
 |---|---|---|
-| Serper (SERP) | $0.001 | Always (1 search per domain) |
-| EmailListVerify (Tier 1) | $0.0004 / email | Each permutation tested |
-| Debounce (Tier 2) | $0.0015 / email | Cascade fallback or catch-all cross-validation |
+| Cache hit | $0.000 | Email already verified within the last 30 days |
+| EmailListVerify (Tier 1) | $0.0004 / email | First live verification attempt |
+| Debounce (Tier 2) | $0.0015 / email | Cascade fallback when Tier 1 is inconclusive |
 
-**Estimated cost by scenario:**
+## Do Not Contact — Architecture
 
-| Scenario | Serper | ELV | Debounce | Total |
-|---|---|---|---|---|
-| Cache hit | — | — | — | **$0.000** |
-| SERP direct match (1 ELV call) | $0.001 | $0.0004 | — | **$0.0014** |
-| Found in 1st batch (5 perms) | $0.001 | $0.002 | — | **$0.003** |
-| Catch-all domain (1 batch + Debounce) | $0.001 | $0.002 | $0.0015 | **$0.0045** |
-| 2 batches, Tier 1 only | $0.001 | $0.004 | — | **$0.005** |
-| Worst case (15 perms, both tiers) | $0.001 | $0.006 | $0.0225 | **$0.0295** |
+```
+clients ──< dnc_sources ──< dnc_entries
+  │             │                │
+  │             │                └─ email / phone_e164 / domain + reason + source_type
+  │             └─ type: 'csv' | 'hubspot_list'  (+ hubspot_list_id, last_sync_*)
+  └─ external_id (the API client_id), optional HubSpot token
+```
 
-**Typical cost: ~$0.003 per email** (SERP patterns prioritize the right permutation early).
+- **clients** — one row per tenant. `external_id` is what callers pass as `client_id`. A per-client HubSpot private-app token is stored here (only for clients that sync from HubSpot).
+- **dnc_sources** — where a client's DNC entries come from. A CSV upload or a HubSpot list. HubSpot sources carry the `hubspot_list_id` and the last-sync status.
+- **dnc_entries** — the suppressed contacts. Each row can carry any of email / phone / domain. A check matches on **any** provided identifier (and the email's domain against domain entries).
+
+**Ingestion paths**
+- **CSV** → `POST /admin/dnc/import` (headers auto-detected; re-importing the same `source_label` replaces that source's entries).
+- **HubSpot lists** → register with `POST /admin/dnc/sources`, then sync. Each sync pulls the list's **current** membership (works for dynamic/active lists) and replaces that source's entries as a full snapshot.
+
+### Daily HubSpot sync (cron)
+
+The sync is exposed two ways — wire **one** to a daily scheduler:
+
+```bash
+# CLI (Railway cron, GitHub Actions, etc.)
+npm run dnc:sync                 # all active clients
+npm run dnc:sync -- cust_123     # a single client
+
+# or HTTP (any external/platform cron)
+curl -X POST http://localhost:3000/admin/dnc/sync \
+  -H "Authorization: Bearer your_api_key" -H "Content-Type: application/json" -d '{}'
+```
+
+Example Railway cron (daily at 03:00 UTC): schedule the command `npm run dnc:sync`.
+
+> Sync is intentionally **not** an in-process timer, so it runs once regardless of how many app instances are deployed. HubSpot credentials live per-client in the DB, so no app-wide HubSpot env var is needed.
 
 ## Pending / Roadmap
-- `POST /find/batch` — Batch email finding (array of contacts, background processing).
 - `POST /verify/batch` — Batch email verification.
 - Tier 3 verification provider (NeverBounce).
 

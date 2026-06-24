@@ -30,10 +30,3 @@ export interface CompanyResolution {
     company_id?: string;
     company?: Company;
 }
-
-export interface TechResult {
-    technologies: string;
-    scripts: string[];
-    links: string[];
-    meta: Record<string, string>[];
-}

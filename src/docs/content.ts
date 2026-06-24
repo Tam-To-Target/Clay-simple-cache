@@ -170,55 +170,12 @@ Retrieve a company by identifier.
 
 ---
 
-## Email Finder
+## Email Cache
 
-### 5. Find Email
-**POST** \`/find\`
-
-Given a person's name and company domain, finds their most likely email address using pattern permutation and multi-tier API verification.
-
-**Request Body (JSON)**:
-| Field | Type | Required | Description |
-|---|---|---|---|
-| \`first_name\` | String | No* | Person's first name. |
-| \`last_name\` | String | No* | Person's last name. |
-| \`full_name\` | String | No* | Full name (parsed with LATAM logic). |
-| \`domain\` | String | **Yes** | Company domain (e.g. "empresa.com"). |
-| \`max_tier\` | Number | No | Max verification tier: 1 or 2 (default: 2). |
-
-*At least one of \`first_name\`, \`last_name\`, or \`full_name\` is required.*
-
-**Response (JSON)**:
-\`\`\`json
-{
-  "success": true,
-  "email": "juan.garcia@empresa.com",
-  "status": "valid",
-  "confidence": 0.95,
-  "method": "emaillistverify",
-  "pattern": "first.last",
-  "domain_info": {
-    "domain": "empresa.com",
-    "has_mx": true,
-    "provider": "google_workspace",
-    "is_catch_all": false,
-    "is_disposable": false,
-    "is_free_provider": false
-  },
-  "permutations_tried": 1,
-  "cost_usd": 0.0004,
-  "duration_ms": 983
-}
-\`\`\`
-
-**Possible \`status\` values**: \`valid\`, \`invalid\`, \`catch_all\`, \`unknown\`, \`risky\`, \`disposable\`, \`no_mx\`, \`role_account\`.
-
----
-
-### 6. Verify Email
+### 5. Verify Email
 **POST** \`/verify\`
 
-Verify an existing email address through the API cascade.
+Verify an existing email address. Results are served from the verification cache when available; otherwise the email is checked through the multi-tier API cascade and the result is cached.
 
 **Request Body (JSON)**:
 | Field | Type | Required | Description |
@@ -241,103 +198,142 @@ Verify an existing email address through the API cascade.
 
 ---
 
-### 7. Stats
+### 6. Stats
 **GET** \`/stats\`
 
-Returns aggregate metrics for the email finder service.
+Returns aggregate metrics for the email verification cache.
 
 **Response (JSON)**:
 \`\`\`json
 {
-  "total_searches": 100,
-  "total_valid_found": 15,
-  "success_rate": 0.15,
-  "methods_breakdown": { "emaillistverify": 12, "debounce": 3 },
-  "total_cost_usd": 0.099,
-  "avg_cost_per_email": 0.00099,
-  "domains_in_cache": 93,
-  "patterns_learned": 8,
-  "catch_all_domains": 17
+  "emails_cached": 1240,
+  "valid_cached": 870,
+  "catch_all_cached": 95,
+  "methods_breakdown": { "emaillistverify": 720, "debounce": 150 },
+  "domains_in_cache": 93
 }
 \`\`\`
 
 ---
 
----
+## Do Not Contact (DNC)
 
-## Tech Detector
+Multi-tenant suppression. Each **client** (identified by \`client_id\`) has its own
+DNC list. Entries can match on **email**, **phone (E.164)**, or **domain**
+(domain entries block every contact at that company). DNC data is loaded from
+CSV uploads and from HubSpot lists (synced on a schedule).
 
-### 8. Detect Technologies
-**POST** \`/detect-tech\`
+### 7. DNC Check
+**POST** \`/dnc-check\`
 
-Given a URL, fetches the page HTML and detects web technologies in use (analytics, CMS, payments, marketing tools, etc.) via regex pattern matching.
-
-**Authentication**: Required (Bearer token)
+Check whether a contact is on a client's Do Not Contact list. If suppressed, the
+response says so (with the reason and source) and **does not** return contact
+data. If not suppressed, it returns the contact's cached profile data (if any).
 
 **Request Body (JSON)**:
 | Field | Type | Required | Description |
 |---|---|---|---|
-| \`url\` | String | **Yes** | Full URL to inspect (e.g. "https://example.com"). |
+| \`client_id\` | String | **Yes** | The client's \`external_id\`. |
+| \`email\` | String | No* | Contact email. |
+| \`phone\` | String | No* | Contact phone (normalized to E.164). |
+| \`domain\` | String | No* | Company domain. |
 
-**Example**:
-\`\`\`bash
-curl -X POST -H "Authorization: Bearer your_secret_key" \\
-  -H "Content-Type: application/json" \\
-  -d '{"url": "https://example.com"}' \\
-  {{BASE_URL}}/detect-tech
-\`\`\`
+*At least one of \`email\`, \`phone\`, or \`domain\` is required. The email's domain is also matched against domain-level entries.*
 
-**Response (JSON)**:
+**Response — suppressed (JSON)**:
 \`\`\`json
 {
-  "success": true,
-  "url": "https://example.com",
-  "cms": "WordPress 6.4",
-  "ecommerce": "WooCommerce",
-  "analytics": ["Google Analytics (GA4)", "Facebook Pixel", "Hotjar"],
-  "tag_managers": ["Google Tag Manager"],
-  "frameworks": [],
-  "marketing": ["HubSpot", "Intercom"],
-  "advertising": ["Google Ads", "LinkedIn Insight Tag"],
-  "payments": ["Stripe"],
-  "cdn": ["Cloudflare"],
-  "seo": ["Yoast SEO"],
-  "privacy": ["CookieBot"],
-  "otros": [],
-  "resumen": "WordPress 6.4 | WooCommerce | Google Analytics (GA4) | Facebook Pixel | ..."
+  "client_id": "cust_123",
+  "contactable": false,
+  "status": "do_not_contact",
+  "reason": "Unsubscribed",
+  "matched_on": "email",
+  "matched_value": "juan@empresa.com",
+  "source": { "type": "hubspot_list", "label": "Suppression", "hubspot_list_id": "42", "synced_at": "..." },
+  "added_at": "..."
 }
 \`\`\`
 
-**Response Fields**:
-| Field | Type | Description |
-|---|---|---|
-| \`cms\` | String | Detected CMS name (with version if available), or empty string. |
-| \`ecommerce\` | String | Detected e-commerce platform, or empty string. |
-| \`analytics\` | String[] | Analytics and tracking tools detected. |
-| \`tag_managers\` | String[] | Tag manager tools detected. |
-| \`frameworks\` | String[] | JS frameworks detected (always \`[]\` in current version). |
-| \`marketing\` | String[] | Marketing automation / chat / CRM tools detected. |
-| \`advertising\` | String[] | Paid advertising pixels detected. |
-| \`payments\` | String[] | Payment processors detected. |
-| \`cdn\` | String[] | CDN providers detected. |
-| \`seo\` | String[] | SEO plugins/tools detected. |
-| \`privacy\` | String[] | Cookie consent / privacy tools detected. |
-| \`otros\` | String[] | Any other detected technologies. |
-| \`resumen\` | String | All detected items joined with \` | \` as a single summary string. |
+**Response — contactable (JSON)**:
+\`\`\`json
+{
+  "client_id": "cust_123",
+  "contactable": true,
+  "status": "ok",
+  "contact": { "email": "juan@empresa.com", "phone": "+52...", "firstName": "Juan", "...": "...cached profile data..." }
+}
+\`\`\`
 
-**Error Responses**:
-| Status | Body | Reason |
-|---|---|---|
-| \`400\` | \`{ "error": "url is required" }\` | The \`url\` field is missing from the request body. |
-| \`400\` | \`{ "error": "Invalid URL format" }\` | The provided URL could not be parsed. |
-| \`502\` | \`{ "error": "HTTP {status} desde la URL" }\` | The target URL returned a non-2xx HTTP status. |
-| \`504\` | \`{ "error": "Timeout al obtener la URL" }\` | The request to the target URL timed out (15s limit). |
-| \`500\` | \`{ "error": "..." }\` | Unexpected server error. |
+**Errors**: \`400\` (missing \`client_id\` or no identifier), \`404\` (unknown/inactive client).
+
+---
+
+## DNC Administration
+
+These endpoints manage clients and their DNC sources. All require the Bearer API key.
+
+### 8. Upsert Client
+**POST** \`/admin/clients\`
+
+Create or update a client (tenant), keyed by \`external_id\`.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`external_id\` | String | **Yes** | The ID used in \`/dnc-check\` payloads. |
+| \`name\` | String | No | Display name. |
+| \`active\` | Boolean | No | Defaults to true. |
+| \`hubspot_portal_id\` | String | No | HubSpot portal ID. |
+| \`hubspot_access_token\` | String | No | HubSpot private-app token (used to read lists). Never returned by the API. |
+
+### 9. Get Client
+**GET** \`/admin/clients/:external_id\`
+
+Returns the client and its DNC sources (with last-sync status). The HubSpot token is never included.
+
+### 10. Register DNC Source
+**POST** \`/admin/dnc/sources\`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`client_id\` | String | **Yes** | Client \`external_id\`. |
+| \`type\` | String | **Yes** | \`csv\` or \`hubspot_list\`. |
+| \`label\` | String | No | Friendly name. |
+| \`hubspot_list_id\` | String | Yes for \`hubspot_list\` | The HubSpot list to sync. |
+| \`active\` | Boolean | No | Defaults to true. |
+
+### 11. Import DNC (CSV)
+**POST** \`/admin/dnc/import\`
+
+Load DNC entries from a CSV string or an explicit entries array.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`client_id\` | String | **Yes** | Client \`external_id\`. |
+| \`csv\` | String | No* | Raw CSV text (headers auto-detected: email/phone/domain/reason). |
+| \`entries\` | Array | No* | \`[{ email?, phone?, domain?, reason? }]\`. |
+| \`column_map\` | Object | No | Override header detection, e.g. \`{ "email": "Correo" }\`. |
+| \`source_label\` | String | No | Names the CSV source (re-importing the same label replaces it). |
+| \`reason\` | String | No | Default reason for rows without one. |
+| \`mode\` | String | No | \`replace\` (default) or \`append\`. |
+
+*Provide either \`csv\` or \`entries\`.*
+
+Response: \`{ "status": "ok", "source_id": "...", "mode": "replace", "imported": 120, "skipped": 3 }\`.
+
+### 12. Sync HubSpot Lists
+**POST** \`/admin/dnc/sync\`
+
+Pulls current HubSpot list memberships into the DNC tables (full snapshot replace per list). Cron-friendly — wire a daily scheduler to this endpoint, or run \`npm run dnc:sync\`.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`client_id\` | String | No | Sync one client; omit to sync all active clients. |
+
+Response: \`{ "status": "ok", "scope": "all", "sources_synced": 4, "results": [ ... ] }\`.
 
 ---
 
 ### Pending (Not Yet Implemented)
-- **POST /find/batch** — Batch email finding (accepts array of contacts, processes in background).
 - **POST /verify/batch** — Batch email verification.
 - **Tier 3 verification** — NeverBounce provider ($0.008/email).
 `;

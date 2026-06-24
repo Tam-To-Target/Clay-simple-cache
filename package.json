@@ -10,6 +10,7 @@
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
     "prisma:studio": "prisma studio",
+    "dnc:sync": "ts-node src/scripts/sync-dnc.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

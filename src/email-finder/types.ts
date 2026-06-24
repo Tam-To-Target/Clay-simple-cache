@@ -16,7 +16,6 @@ export enum VerificationMethod {
   debounce = "debounce",
   bouncer = "bouncer",
   neverbounce = "neverbounce",
-  serp_pattern = "serp_pattern",
 }
 
 export enum ProviderType {
@@ -37,33 +36,14 @@ export interface DomainInfo {
   smtp_verifiable: boolean;
 }
 
-export interface SerpInfo {
-  used: boolean;
-  emails_found: number;
-  patterns_detected: { pattern: string; count: number; examples: string[] }[];
-  direct_match: string | null;
-}
-
 export interface VerificationResult {
   email: string | null;
   status: EmailStatus;
   confidence: number;
   method: VerificationMethod | null;
-  pattern: string | null;
   domain_info: DomainInfo | null;
-  serp_info: SerpInfo | null;
-  permutations_tried: number;
   cost_usd: number;
   duration_ms: number;
-}
-
-export interface FindRequest {
-  first_name?: string;
-  last_name?: string;
-  domain: string;
-  full_name?: string;
-  max_tier?: number;
-  force_premium?: boolean;
 }
 
 export interface EmailVerificationProvider {

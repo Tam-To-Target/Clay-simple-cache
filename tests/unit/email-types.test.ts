@@ -37,7 +37,6 @@ describe("VerificationMethod enum", () => {
     expect(VerificationMethod.local_syntax).toBe("local_syntax");
     expect(VerificationMethod.emaillistverify).toBe("emaillistverify");
     expect(VerificationMethod.debounce).toBe("debounce");
-    expect(VerificationMethod.serp_pattern).toBe("serp_pattern");
   });
 });
 

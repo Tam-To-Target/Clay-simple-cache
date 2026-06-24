@@ -38,7 +38,7 @@ model Company {
   @@map("companies")
 }
 
-// ─── Email Finder ───────────────────────────────────────────
+// ─── Email Cache ────────────────────────────────────────────
 
 model VerificationCache {
   id          String   @id @default(uuid()) @db.Uuid
@@ -51,19 +51,6 @@ model VerificationCache {
 
   @@index([email])
   @@map("verification_cache")
-}
-
-model DomainPattern {
-  id             String   @id @default(uuid()) @db.Uuid
-  domain         String
-  pattern        String
-  confidence     Float    @default(1.0)
-  sample_count   Int      @default(1)
-  last_confirmed DateTime @default(now()) @db.Timestamptz(6)
-
-  @@unique([domain, pattern])
-  @@index([domain])
-  @@map("domain_patterns")
 }
 
 model DomainIntel {
@@ -82,20 +69,81 @@ model DomainIntel {
   @@map("domain_intel")
 }
 
-model SearchLog {
-  id                 String   @id @default(uuid()) @db.Uuid
-  first_name         String?
-  last_name          String?
-  domain             String?
-  result_email       String?
-  result_status      String?
-  method_used        String?
-  permutations_tried Int      @default(0)
-  api_calls_made     Int      @default(0)
-  cost_usd           Float    @default(0.0)
-  duration_ms        Int      @default(0)
-  created_at         DateTime @default(now()) @db.Timestamptz(6)
+// ─── Do Not Contact (multi-tenant) ──────────────────────────
 
-  @@index([domain])
-  @@map("search_log")
+// A customer/tenant. `external_id` is the value passed in API payloads
+// (e.g. "client_id"). HubSpot credentials are optional and only needed
+// for clients that sync DNC data from HubSpot lists.
+model Client {
+  id                   String   @id @default(uuid()) @db.Uuid
+  external_id          String   @unique
+  name                 String
+  active               Boolean  @default(true)
+  // HubSpot private-app token used to read the client's lists.
+  // NOTE: stored as provided — protect DB access accordingly.
+  hubspot_portal_id    String?
+  hubspot_access_token String?
+  created_at           DateTime @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime @updatedAt @db.Timestamptz(6)
+
+  dnc_sources DncSource[]
+  dnc_entries DncEntry[]
+
+  @@index([external_id])
+  @@map("clients")
+}
+
+// Where a client's DNC entries come from: an uploaded CSV or a HubSpot list.
+// HubSpot sources are re-synced (full snapshot) on a schedule; their entries
+// are replaced wholesale on each sync.
+model DncSource {
+  id               String    @id @default(uuid()) @db.Uuid
+  client_id        String    @db.Uuid
+  client           Client    @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  type             String    // 'csv' | 'hubspot_list'
+  label            String?
+  hubspot_list_id  String?   // for type = 'hubspot_list'
+  active           Boolean   @default(true)
+  last_synced_at   DateTime? @db.Timestamptz(6)
+  last_sync_status String?   // 'ok' | 'error'
+  last_sync_error  String?
+  last_entry_count Int       @default(0)
+  created_at       DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime  @updatedAt @db.Timestamptz(6)
+
+  entries DncEntry[]
+
+  // Prevents duplicate HubSpot-list sources per client.
+  // (CSV sources have a null hubspot_list_id; Postgres treats nulls as
+  // distinct, so multiple CSV sources per client are allowed.)
+  @@unique([client_id, hubspot_list_id])
+  @@index([client_id])
+  @@map("dnc_sources")
+}
+
+// A single suppressed contact for a client. A row may carry any combination
+// of email / phone / domain; the check matches on ANY provided identifier.
+model DncEntry {
+  id          String     @id @default(uuid()) @db.Uuid
+  client_id   String     @db.Uuid
+  client      Client     @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  source_id   String?    @db.Uuid
+  source      DncSource? @relation(fields: [source_id], references: [id], onDelete: Cascade)
+  source_type String     // 'csv' | 'hubspot_list' | 'manual'
+
+  email      String?
+  phone_e164 String?
+  domain     String?
+
+  reason     String?
+  data       Json     @default("{}") // extra context (hubspot contact id, raw row, etc)
+
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  updated_at DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([client_id, email])
+  @@index([client_id, phone_e164])
+  @@index([client_id, domain])
+  @@index([source_id])
+  @@map("dnc_entries")
 }

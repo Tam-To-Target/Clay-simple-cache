@@ -9,7 +9,6 @@ vi.mock("../../src/email-finder/config", () => ({
     emaillistverify_api_key: "test-key",
     debounce_api_key: "test-key",
     serper_api_key: "test-key",
-    max_permutations_to_try: 15,
     domain_cache_ttl: 604800,
     verification_cache_ttl: 2592000,
   },
