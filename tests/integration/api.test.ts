@@ -267,47 +267,6 @@ describe("API Integration Tests", () => {
     });
   });
 
-  describe("POST /verify", () => {
-    it("returns 400 when email is missing", async () => {
-      const res = await request(app)
-        .post("/verify")
-        .set("Authorization", `Bearer ${API_KEY}`)
-        .send({});
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("email is required");
-    });
-  });
-
-  describe("GET /stats", () => {
-    it("returns cache stats with all fields", async () => {
-      const res = await request(app)
-        .get("/stats")
-        .set("Authorization", `Bearer ${API_KEY}`);
-
-      expect(res.status).toBe(200);
-      expect(res.body).toHaveProperty("emails_cached");
-      expect(res.body).toHaveProperty("valid_cached");
-      expect(res.body).toHaveProperty("catch_all_cached");
-      expect(res.body).toHaveProperty("methods_breakdown");
-      expect(res.body).toHaveProperty("domains_in_cache");
-    });
-
-    it("reports cached email counts", async () => {
-      mockPrisma.verificationCache.count
-        .mockResolvedValueOnce(100) // emails_cached
-        .mockResolvedValueOnce(75)  // valid_cached
-        .mockResolvedValueOnce(10); // catch_all_cached
-
-      const res = await request(app)
-        .get("/stats")
-        .set("Authorization", `Bearer ${API_KEY}`);
-
-      expect(res.body.emails_cached).toBe(100);
-      expect(res.body.valid_cached).toBe(75);
-      expect(res.body.catch_all_cached).toBe(10);
-    });
-  });
-
   describe("GET / (redirect)", () => {
     it("redirects to /docs/api", async () => {
       const res = await request(app).get("/");

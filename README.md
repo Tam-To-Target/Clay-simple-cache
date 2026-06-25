@@ -1,6 +1,6 @@
 # Identity Cache & Enrichment API
 
-Service to ingest, normalize, and enrich identity data (Profiles & Companies). It allows upserting records based on normalized keys and merging data into a unified record. Includes an **Email Cache** module for verifying and caching professional email addresses.
+Service to ingest, normalize, and enrich identity data (Profiles & Companies). It allows upserting records based on normalized keys and merging data into a unified record, plus a multi-tenant **Do Not Contact** suppression service backed by HubSpot lists.
 
 ## Features
 - **Profiles**:
@@ -9,10 +9,6 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
 - **Companies**:
   - Normalization: Domain (trim, lowercase, remove www/protocol), LinkedIn.
   - Resolution: Domain > LinkedIn.
-- **Email Cache**:
-  - Verifies an email address through a multi-tier API cascade (EmailListVerify, DeBounce).
-  - Domain intelligence: MX lookup, provider detection, disposable/free checks.
-  - Verification caching (30 days) and domain intel caching (7 days) — repeat lookups are served from cache at zero cost.
 - **Do Not Contact (DNC)**:
   - Multi-tenant suppression — each client (`client_id`) has its own DNC list.
   - Matches on email, phone (E.164), or domain (domain entries block a whole company).
@@ -40,9 +36,10 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
    - `PORT`: Server port (default 3000)
    - `API_KEY`: Bearer token for authentication
    - `DATABASE_URL`: Neon Postgres connection string (`sslmode=require`)
-   - `EMAILLISTVERIFY_API_KEY`: Tier 1 verification provider
-   - `DEBOUNCE_API_KEY`: Tier 2 verification provider
    - `SERPER_API_KEY`: SERP lookups for the LinkedIn finder (google.serper.dev)
+   - `HUBSPOT_TOKES_DATABASE_URL`: tokens DB (portal IDs of installed HubSpot apps)
+   - `HUBSPOT_PROVISIONER_URL` / `HUBSPOT_PROVISIONER_API_SECRET`: resolve+refresh HubSpot tokens per portal
+   - `DNC_LIST_NAME_PREFIX`: DNC list name to discover (default `TAM - Do Not Contact`)
 
 3. **Database Setup**:
    Push the schema to your database:
@@ -75,10 +72,6 @@ See full documentation at `GET /docs/api` or visit `http://localhost:3000/docs/a
   - `POST /companies`: Upsert/Enrich a company.
   - `GET /companies`: Query by `domain` or `linkedin`.
 
-- **Email Cache**
-  - `POST /verify`: Verify an email address (cache-first, falls back to the API cascade).
-  - `GET /stats`: Aggregate metrics for the verification cache.
-
 - **LinkedIn Finder**
   - `POST /find-linkedin`: Find a company's LinkedIn page by domain.
 
@@ -103,40 +96,6 @@ curl -X POST http://localhost:3000/dnc-check \
 
 Suppressed → `{ "contactable": false, "status": "do_not_contact", "reason": "...", "matched_on": "email", "source": { ... } }`
 Allowed → `{ "contactable": true, "contact": { ...cached profile... } }`
-
-### Example: Verify Email
-
-```bash
-curl -X POST http://localhost:3000/verify \
-  -H "Authorization: Bearer your_api_key" \
-  -H "Content-Type: application/json" \
-  -d '{"email": "juan@empresa.com"}'
-```
-
-**Response:**
-```json
-{
-  "email": "juan@empresa.com",
-  "status": "valid",
-  "confidence": 0.95,
-  "method": "emaillistverify",
-  "domain_info": { "domain": "empresa.com", "has_mx": true, "provider": "google_workspace" },
-  "cost_usd": 0.0004,
-  "duration_ms": 450
-}
-```
-
-**Possible `status` values**: `valid`, `invalid`, `catch_all`, `unknown`, `risky`, `disposable`, `no_mx`, `role_account`.
-
-## Email Cache — Cost per Lookup
-
-Each verification runs through up to 2 paid services. A cache hit costs nothing.
-
-| Service | Cost per call | When it runs |
-|---|---|---|
-| Cache hit | $0.000 | Email already verified within the last 30 days |
-| EmailListVerify (Tier 1) | $0.0004 / email | First live verification attempt |
-| Debounce (Tier 2) | $0.0015 / email | Cascade fallback when Tier 1 is inconclusive |
 
 ## Do Not Contact — Architecture
 
@@ -173,10 +132,6 @@ curl -X POST http://localhost:3000/admin/dnc/sync \
 Example Railway cron (daily at 03:00 UTC): schedule the command `npm run dnc:sync`.
 
 > Sync is intentionally **not** an in-process timer, so it runs once regardless of how many app instances are deployed. HubSpot credentials live per-client in the DB, so no app-wide HubSpot env var is needed.
-
-## Pending / Roadmap
-- `POST /verify/batch` — Batch email verification.
-- Tier 3 verification provider (NeverBounce).
 
 ## Testing Normalization
 Run the verification scripts:

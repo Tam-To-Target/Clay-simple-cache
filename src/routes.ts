@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { profilesController } from './controllers/profiles.controller';
 import { companiesController } from './controllers/companies.controller';
-import { emailFinderController } from './controllers/email-finder.controller';
 import { linkedinFinderController } from './controllers/linkedin-finder.controller';
 import { dncController } from './controllers/dnc.controller';
 
@@ -17,10 +16,6 @@ router.get('/profiles', authMiddleware, profilesController.get);
 
 router.post('/companies', authMiddleware, companiesController.upsert);
 router.get('/companies', authMiddleware, companiesController.get);
-
-// Email Cache (verification + cache)
-router.post('/verify', authMiddleware, emailFinderController.verify);
-router.get('/stats', authMiddleware, emailFinderController.stats);
 
 // LinkedIn Finder
 router.post('/find-linkedin', authMiddleware, linkedinFinderController.find);

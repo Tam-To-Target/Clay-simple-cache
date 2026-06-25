@@ -170,55 +170,9 @@ Retrieve a company by identifier.
 
 ---
 
-## Email Cache
-
-### 5. Verify Email
-**POST** \`/verify\`
-
-Verify an existing email address. Results are served from the verification cache when available; otherwise the email is checked through the multi-tier API cascade and the result is cached.
-
-**Request Body (JSON)**:
-| Field | Type | Required | Description |
-|---|---|---|---|
-| \`email\` | String | **Yes** | The email to verify. |
-| \`max_tier\` | Number | No | Max verification tier: 1 or 2 (default: 2). |
-
-**Response (JSON)**:
-\`\`\`json
-{
-  "email": "juan@empresa.com",
-  "status": "valid",
-  "confidence": 0.95,
-  "method": "emaillistverify",
-  "domain_info": { ... },
-  "cost_usd": 0.0004,
-  "duration_ms": 450
-}
-\`\`\`
-
----
-
-### 6. Stats
-**GET** \`/stats\`
-
-Returns aggregate metrics for the email verification cache.
-
-**Response (JSON)**:
-\`\`\`json
-{
-  "emails_cached": 1240,
-  "valid_cached": 870,
-  "catch_all_cached": 95,
-  "methods_breakdown": { "emaillistverify": 720, "debounce": 150 },
-  "domains_in_cache": 93
-}
-\`\`\`
-
----
-
 ## LinkedIn Finder
 
-### 7. Find Company LinkedIn
+### 5. Find Company LinkedIn
 **POST** \`/find-linkedin\`
 
 Given a domain (or URL), finds the company's LinkedIn page via a SERP lookup (requires \`SERPER_API_KEY\`).
@@ -263,7 +217,7 @@ A \`/dnc-check\` matches the incoming email's domain against domain-level entrie
 so domain suppression works even when the caller only sends an email. Lists are
 re-discovered and re-synced on a daily schedule (full snapshot replace per list).
 
-### 8. DNC Check
+### 6. DNC Check
 **POST** \`/dnc-check\`
 
 Check whether a contact is on a client's Do Not Contact list. If suppressed, the
@@ -316,7 +270,7 @@ A \`404\` includes \`suggestions\` — the closest known client handles — when
 
 These endpoints manage clients and their DNC sources. All require the Bearer API key.
 
-### 9. Upsert Client
+### 7. Upsert Client
 **POST** \`/admin/clients\`
 
 Create or update a client (tenant), keyed by \`external_id\`.
@@ -329,12 +283,12 @@ Create or update a client (tenant), keyed by \`external_id\`.
 | \`hubspot_portal_id\` | String | No | HubSpot portal ID. Tokens are resolved (and refreshed) automatically per portal, so this is all the sync needs. |
 | \`hubspot_access_token\` | String | No | Legacy/optional static token. Not required — the multi-tenant sync resolves a fresh token from \`hubspot_portal_id\`. Never returned by the API. |
 
-### 10. Get Client
+### 8. Get Client
 **GET** \`/admin/clients/:external_id\`
 
 Returns the client and its DNC sources (with last-sync status). The HubSpot token is never included.
 
-### 11. Register DNC Source
+### 9. Register DNC Source
 **POST** \`/admin/dnc/sources\`
 
 | Field | Type | Required | Description |
@@ -349,7 +303,7 @@ Returns the client and its DNC sources (with last-sync status). The HubSpot toke
 > Most HubSpot-list sources are created automatically by **Discover** (below) —
 > manual registration is only needed for custom cases.
 
-### 12. Import DNC (CSV)
+### 10. Import DNC (CSV)
 **POST** \`/admin/dnc/import\`
 
 Load DNC entries from a CSV string or an explicit entries array.
@@ -368,7 +322,7 @@ Load DNC entries from a CSV string or an explicit entries array.
 
 Response: \`{ "status": "ok", "source_id": "...", "mode": "replace", "imported": 120, "skipped": 3 }\`.
 
-### 13. Sync HubSpot Lists
+### 11. Sync HubSpot Lists
 **POST** \`/admin/dnc/sync\`
 
 Refreshes membership of the **already-registered** HubSpot-list sources (full
@@ -380,7 +334,7 @@ snapshot replace per list). Does not look for new lists — use **Discover** for
 
 Response: \`{ "status": "ok", "scope": "all", "sources_synced": 4, "results": [ ... ] }\`.
 
-### 14. Discover + Sync HubSpot Lists
+### 12. Discover + Sync HubSpot Lists
 **POST** \`/admin/dnc/discover\`
 
 The cron entry point. For each client it re-scans the portal for
@@ -396,10 +350,4 @@ Equivalent CLI: \`npm run dnc:sync\` (also runs discover + sync).
 Response (per client) includes \`sources_active\`, \`deactivated\`, \`unclassified\`
 (lists that matched the prefix but had no Individual/Domain suffix — reported,
 not synced), and the \`sync\` results.
-
----
-
-### Pending (Not Yet Implemented)
-- **POST /verify/batch** — Batch email verification.
-- **Tier 3 verification** — NeverBounce provider ($0.008/email).
 `;
