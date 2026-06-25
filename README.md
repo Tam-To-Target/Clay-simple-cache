@@ -83,7 +83,11 @@ See full documentation at `GET /docs/api` or visit `http://localhost:3000/docs/a
   - `GET /admin/clients/:external_id`: Inspect a client and its DNC sources.
   - `POST /admin/dnc/sources`: Register a DNC source (`csv` or `hubspot_list`).
   - `POST /admin/dnc/import`: Import DNC entries from a CSV string or array.
-  - `POST /admin/dnc/sync`: Pull current HubSpot list memberships into the DNC tables.
+  - `POST /admin/dnc/sync`: Refresh membership of registered HubSpot-list sources.
+  - `POST /admin/dnc/discover`: Re-discover + classify + sync a client's DNC lists (cron entry point).
+
+- **HubSpot Contact Push**
+  - `POST /admin/hubspot/contacts`: Create/update a contact in the client's portal (required: `email`, `campaign_name`, `campaign_type`, `lead_origin`, `lead_origin_details`; optional `check_dnc` to skip suppressed contacts).
 
 ### Example: DNC Check
 

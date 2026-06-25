@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import prisma from "../db/prisma";
-import { clientService, publicClient } from "../services/client.service";
+import { clientService, publicClient, clientSuggestions } from "../services/client.service";
 import {
   dncService,
   normalizeCheckIdentifiers,
@@ -16,19 +16,6 @@ import {
   discoverAndSyncAll,
   discoverAndSyncClient,
 } from "../services/dnc-sync.service";
-import { suggestSimilar } from "../services/suggest";
-
-/** Closest known client handles for an unknown client_id (for friendlier 404s). */
-async function clientSuggestions(query: string): Promise<string[]> {
-  try {
-    const clients = (await prisma.client.findMany({
-      select: { external_id: true, name: true },
-    })) || [];
-    return suggestSimilar(query, clients.map((c) => ({ id: c.external_id, name: c.name })));
-  } catch {
-    return [];
-  }
-}
 
 export const dncController = {
   /**

@@ -350,4 +350,59 @@ Equivalent CLI: \`npm run dnc:sync\` (also runs discover + sync).
 Response (per client) includes \`sources_active\`, \`deactivated\`, \`unclassified\`
 (lists that matched the prefix but had no Individual/Domain suffix — reported,
 not synced), and the \`sync\` results.
+
+---
+
+## HubSpot Contact Push
+
+### 13. Create Contact
+**POST** \`/admin/hubspot/contacts\`
+
+Create a contact in the client's HubSpot portal. If a contact with the same
+\`email\` already exists it is **updated** instead (idempotent). The token for the
+client's portal is resolved automatically.
+
+**Request Body (JSON)**:
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`client_id\` | String | **Yes** | The client's \`external_id\` (slug). |
+| \`email\` | String | **Yes** | Contact email (identity). |
+| \`campaign_name\` | String | **Yes** | Campaign name. |
+| \`campaign_type\` | String | **Yes** | One of: \`Inbound\`, \`Targeted List\`, \`Signal\`, \`Event\`, \`ICP Fit\` (case-insensitive). |
+| \`lead_origin\` | String | **Yes** | Source (e.g. Website, LinkedIn). |
+| \`lead_origin_details\` | String | **Yes** | Fit-related context. |
+| \`check_dnc\` | Boolean | No | If \`true\`, skip the push when the contact is on the client's DNC list. |
+| \`properties\` | Object | No | Extra HubSpot properties, keyed by **internal** property name. |
+| \`...\` | Any | No | Extra properties may also be passed as top-level keys (internal names). |
+
+**Response — pushed (JSON)**:
+\`\`\`json
+{
+  "status": "ok",
+  "pushed": true,
+  "created": true,
+  "client_id": "tam-to-target",
+  "hubspot_portal_id": "244264386",
+  "contact_id": "508943115974",
+  "dnc_checked": true
+}
+\`\`\`
+\`created\` is \`false\` when an existing contact was updated.
+
+**Response — suppressed (with \`check_dnc: true\`, JSON)**:
+\`\`\`json
+{
+  "status": "do_not_contact",
+  "created": false,
+  "pushed": false,
+  "client_id": "tam-to-target",
+  "reason": "...",
+  "matched_on": "email",
+  "matched_value": "juan@empresa.com"
+}
+\`\`\`
+
+**Errors**: \`400\` (missing required field, invalid \`campaign_type\`, or client has no portal),
+\`404\` (unknown client, with \`suggestions\`), \`422\` (HubSpot rejected a property — e.g. an
+unknown internal name), \`502\` (upstream HubSpot failure).
 `;
