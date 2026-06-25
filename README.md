@@ -21,7 +21,7 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
 - **LinkedIn Finder**:
   - Given a domain, finds the company's LinkedIn page via SERP lookup.
 - **Data Merging**: Merges JSON data safely.
-- **ORM**: Builds on **Prisma** + **Supabase** (PostgreSQL).
+- **ORM**: Builds on **Prisma** + **Neon** (PostgreSQL).
 
 ## Setup
 
@@ -39,8 +39,7 @@ Service to ingest, normalize, and enrich identity data (Profiles & Companies). I
    Required variables:
    - `PORT`: Server port (default 3000)
    - `API_KEY`: Bearer token for authentication
-   - `DATABASE_URL`: Connection Pool URL (Transaction Mode, Port 6543)
-   - `DIRECT_URL`: Direct Connection URL (Session Mode, Port 5432)
+   - `DATABASE_URL`: Neon Postgres connection string (`sslmode=require`)
    - `EMAILLISTVERIFY_API_KEY`: Tier 1 verification provider
    - `DEBOUNCE_API_KEY`: Tier 2 verification provider
    - `SERPER_API_KEY`: SERP lookups for the LinkedIn finder (google.serper.dev)

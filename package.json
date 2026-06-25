@@ -10,6 +10,8 @@
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
     "prisma:studio": "prisma studio",
+    "clients:generate": "ts-node src/scripts/generate-clients.ts",
+    "dnc:bootstrap": "ts-node src/scripts/bootstrap-dnc.ts",
     "dnc:sync": "ts-node src/scripts/sync-dnc.ts",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -32,12 +34,14 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "libphonenumber-js": "^1.12.33",
+    "pg": "^8.22.0",
     "prisma": "^5.22.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^25.0.3",
+    "@types/pg": "^8.20.0",
     "@types/supertest": "^7.2.0",
     "nodemon": "^3.1.11",
     "supertest": "^7.2.2",

@@ -10,7 +10,25 @@ import {
 } from "../services/dnc.service";
 import { profileService } from "../services/profile.service";
 import { parseCsv, resolveColumn } from "../dnc/csv";
-import { syncAllHubspotSources, syncClient } from "../services/dnc-sync.service";
+import {
+  syncAllHubspotSources,
+  syncClient,
+  discoverAndSyncAll,
+  discoverAndSyncClient,
+} from "../services/dnc-sync.service";
+import { suggestSimilar } from "../services/suggest";
+
+/** Closest known client handles for an unknown client_id (for friendlier 404s). */
+async function clientSuggestions(query: string): Promise<string[]> {
+  try {
+    const clients = (await prisma.client.findMany({
+      select: { external_id: true, name: true },
+    })) || [];
+    return suggestSimilar(query, clients.map((c) => ({ id: c.external_id, name: c.name })));
+  } catch {
+    return [];
+  }
+}
 
 export const dncController = {
   /**
@@ -34,7 +52,11 @@ export const dncController = {
 
       const client = await clientService.getByExternalId(client_id);
       if (!client || !client.active) {
-        res.status(404).json({ error: `Unknown or inactive client_id: ${client_id}` });
+        const suggestions = await clientSuggestions(client_id);
+        res.status(404).json({
+          error: `Unknown or inactive client_id: ${client_id}`,
+          ...(suggestions.length ? { suggestions } : {}),
+        });
         return;
       }
 
@@ -121,7 +143,11 @@ export const dncController = {
         include: { dnc_sources: true },
       });
       if (!client) {
-        res.status(404).json({ error: "Client not found" });
+        const suggestions = await clientSuggestions(req.params.external_id);
+        res.status(404).json({
+          error: "Client not found",
+          ...(suggestions.length ? { suggestions } : {}),
+        });
         return;
       }
       const { dnc_sources, ...rest } = client;
@@ -311,6 +337,45 @@ export const dncController = {
 
       const results = await syncAllHubspotSources();
       res.json({ status: "ok", scope: "all", sources_synced: results.length, results });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
+  },
+
+  /**
+   * POST /admin/dnc/discover
+   * Body: { client_id? } — re-discover + sync one client or (if omitted) all.
+   * Re-scans each portal for "<prefix> …" lists, (re)classifies them as
+   * individual/domain, registers/deactivates sources, then syncs membership.
+   * This is the cron-friendly "keep everything fresh" entry point.
+   */
+  async discover(req: Request, res: Response): Promise<void> {
+    try {
+      const { client_id } = req.body || {};
+
+      if (client_id) {
+        const client = await clientService.getByExternalId(client_id);
+        if (!client) {
+          const suggestions = await clientSuggestions(client_id);
+          res.status(404).json({
+            error: `Unknown client_id: ${client_id}`,
+            ...(suggestions.length ? { suggestions } : {}),
+          });
+          return;
+        }
+        const result = await discoverAndSyncClient(client);
+        res.json({ status: "ok", scope: "client", client_id, ...result });
+        return;
+      }
+
+      const result = await discoverAndSyncAll();
+      res.json({
+        status: "ok",
+        scope: "all",
+        clients_discovered: result.discover.length,
+        sources_synced: result.sync.length,
+        ...result,
+      });
     } catch (error: any) {
       res.status(500).json({ error: error.message || "Internal server error" });
     }

@@ -1,0 +1,99 @@
+{
+  "generated_at": "2026-06-25T18:31:21.010Z",
+  "clients": [
+    {
+      "slug": "awarded-software",
+      "portal_id": "242448990",
+      "name": "Awarded Software",
+      "client_reference_name": "Awarded",
+      "domain": "awardedsoftware.com"
+    },
+    {
+      "slug": "club-hub",
+      "portal_id": "23342274",
+      "name": "Club Hub",
+      "client_reference_name": "Club Hub",
+      "domain": "clubhub.co"
+    },
+    {
+      "slug": "cybernut",
+      "portal_id": "45274441",
+      "name": "CyberNut",
+      "client_reference_name": "CyberNut",
+      "domain": "cybernut.ai"
+    },
+    {
+      "slug": "hilight",
+      "portal_id": "22493085",
+      "name": "Hilight",
+      "client_reference_name": "Hilight",
+      "domain": "hilightedu.com"
+    },
+    {
+      "slug": "kaleidoscope",
+      "portal_id": "21369353",
+      "name": "Kaleidoscope",
+      "client_reference_name": "Kaleidoscope",
+      "domain": "mykaleidoscope.com"
+    },
+    {
+      "slug": "mastra",
+      "portal_id": "47815345",
+      "name": "Mastra AI",
+      "client_reference_name": "Mastra",
+      "domain": "mastra.ai"
+    },
+    {
+      "slug": "nido-learning",
+      "portal_id": "46773168",
+      "name": "Nido Learning",
+      "client_reference_name": "Nido",
+      "domain": "nidolearning.com"
+    },
+    {
+      "slug": "pathwise",
+      "portal_id": "2100863",
+      "name": "Pathwise",
+      "client_reference_name": "Pathwise",
+      "domain": "transact.com"
+    },
+    {
+      "slug": "reddrop",
+      "portal_id": "245381868",
+      "name": "RedDrop",
+      "client_reference_name": "RedDrop",
+      "domain": "tryreddrop.com"
+    },
+    {
+      "slug": "scantron",
+      "portal_id": "47008204",
+      "name": "Scantron",
+      "client_reference_name": "Scantron",
+      "domain": "scantron.com"
+    },
+    {
+      "slug": "stellic",
+      "portal_id": "3313790",
+      "name": "Stellic",
+      "client_reference_name": "Stellic",
+      "domain": "stellic.com"
+    },
+    {
+      "slug": "studentbridge",
+      "portal_id": "20524720",
+      "name": "StudentBridge",
+      "client_reference_name": "StudentBridge",
+      "domain": "studentbridge.com"
+    },
+    {
+      "slug": "tam-to-target",
+      "portal_id": "244264386",
+      "name": "TAM to Target",
+      "client_reference_name": "TAMtoTarget",
+      "domain": "tamtotarget.com"
+    }
+  ],
+  "unmapped_portals": [
+    "85896"
+  ]
+}

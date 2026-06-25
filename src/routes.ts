@@ -34,6 +34,7 @@ router.get('/admin/clients/:external_id', authMiddleware, dncController.getClien
 router.post('/admin/dnc/sources', authMiddleware, dncController.upsertSource);
 router.post('/admin/dnc/import', authMiddleware, dncController.importCsv);
 router.post('/admin/dnc/sync', authMiddleware, dncController.sync);
+router.post('/admin/dnc/discover', authMiddleware, dncController.discover);
 
 router.get('/docs/api', docsController.get);
 

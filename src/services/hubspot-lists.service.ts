@@ -19,6 +19,65 @@ export interface HubspotListContact {
   hubspot_id: string;
   email: string | null;
   phone: string | null;
+  /** HubSpot's computed email domain (hs_email_domain), used for domain-level DNC. */
+  email_domain: string | null;
+}
+
+export type DncLevel = "individual" | "domain";
+
+export interface DncListInfo {
+  listId: string;
+  name: string;
+  /** null = name matched the prefix but had no recognized (Individual)/(Domain) suffix. */
+  level: DncLevel | null;
+}
+
+interface ListSearchResponse {
+  lists?: { list?: any }[] | any[];
+}
+
+/**
+ * Classify a DNC list by its name. Matching is substring + case-insensitive so
+ * it tolerates client-suffixed names like "TAM - Do Not Contact (Domain) | (Acme)".
+ * Anything without a recognized suffix (plain name, "(Inbound)", etc.) returns
+ * null — the caller reports these rather than syncing them.
+ */
+export function classifyDncList(name: string): DncLevel | null {
+  const n = (name || "").toLowerCase();
+  if (n.includes("(domain)")) return "domain";
+  if (n.includes("(individual)")) return "individual";
+  return null;
+}
+
+/**
+ * Find a portal's "<prefix> …" lists and classify each. Only lists whose name
+ * starts with the prefix are returned (the search itself is fuzzy).
+ */
+export async function searchDncLists(
+  tokenProvider: TokenProvider,
+  prefix: string
+): Promise<DncListInfo[]> {
+  const res = await hsFetch(`/crm/v3/lists/search`, tokenProvider, {
+    method: "POST",
+    body: JSON.stringify({ query: prefix, count: 100 }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HubSpot list search failed: HTTP ${res.status} ${body}`);
+  }
+
+  const json = (await res.json()) as ListSearchResponse;
+  const items = (json.lists || []) as any[];
+  const p = prefix.trim().toLowerCase();
+
+  return items
+    .map((i) => (i && i.list ? i.list : i))
+    .filter((l) => l && typeof l.name === "string" && l.name.toLowerCase().startsWith(p))
+    .map((l) => ({
+      listId: String(l.listId),
+      name: l.name as string,
+      level: classifyDncList(l.name),
+    }));
 }
 
 interface MembershipsResponse {
@@ -30,11 +89,13 @@ interface BatchReadResponse {
   results?: { id: string; properties?: Record<string, string | null> }[];
 }
 
-async function hsFetch(
-  path: string,
-  token: string,
-  init?: RequestInit
-): Promise<Response> {
+/**
+ * Resolves a HubSpot bearer token. `force` must bypass any cache and mint a
+ * fresh token — used to recover from a mid-run expiry (HTTP 401).
+ */
+export type TokenProvider = (force?: boolean) => Promise<string>;
+
+async function rawFetch(path: string, token: string, init?: RequestInit): Promise<Response> {
   return fetch(`${HUBSPOT_BASE}${path}`, {
     ...init,
     headers: {
@@ -45,8 +106,23 @@ async function hsFetch(
   });
 }
 
+/**
+ * Fetch with automatic recovery from token expiry: a long sync can outlive the
+ * token it started with, so on a 401 we force-refresh once and retry. Request
+ * bodies are JSON strings, so re-sending `init` is safe.
+ */
+async function hsFetch(
+  path: string,
+  tokenProvider: TokenProvider,
+  init?: RequestInit
+): Promise<Response> {
+  const res = await rawFetch(path, await tokenProvider(), init);
+  if (res.status !== 401) return res;
+  return rawFetch(path, await tokenProvider(true), init);
+}
+
 /** Page through a list's memberships and return all contact record IDs. */
-async function fetchListMemberIds(token: string, listId: string): Promise<string[]> {
+async function fetchListMemberIds(tokenProvider: TokenProvider, listId: string): Promise<string[]> {
   const ids: string[] = [];
   let after: string | undefined;
 
@@ -54,7 +130,7 @@ async function fetchListMemberIds(token: string, listId: string): Promise<string
     const params = new URLSearchParams({ limit: String(MEMBERSHIP_PAGE_SIZE) });
     if (after) params.set("after", after);
 
-    const res = await hsFetch(`/crm/v3/lists/${listId}/memberships?${params}`, token);
+    const res = await hsFetch(`/crm/v3/lists/${listId}/memberships?${params}`, tokenProvider);
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(`HubSpot memberships failed (list ${listId}): HTTP ${res.status} ${body}`);
@@ -70,17 +146,17 @@ async function fetchListMemberIds(token: string, listId: string): Promise<string
 
 /** Batch-read contacts to get email + phone for the given record IDs. */
 async function fetchContactProps(
-  token: string,
+  tokenProvider: TokenProvider,
   ids: string[]
 ): Promise<HubspotListContact[]> {
   const out: HubspotListContact[] = [];
 
   for (let i = 0; i < ids.length; i += BATCH_READ_SIZE) {
     const batch = ids.slice(i, i + BATCH_READ_SIZE);
-    const res = await hsFetch(`/crm/v3/objects/contacts/batch/read`, token, {
+    const res = await hsFetch(`/crm/v3/objects/contacts/batch/read`, tokenProvider, {
       method: "POST",
       body: JSON.stringify({
-        properties: ["email", "phone"],
+        properties: ["email", "phone", "hs_email_domain"],
         inputs: batch.map((id) => ({ id })),
       }),
     });
@@ -96,6 +172,7 @@ async function fetchContactProps(
         hubspot_id: r.id,
         email: r.properties?.email ?? null,
         phone: r.properties?.phone ?? null,
+        email_domain: r.properties?.hs_email_domain ?? null,
       });
     }
   }
@@ -103,12 +180,12 @@ async function fetchContactProps(
   return out;
 }
 
-/** Full snapshot of a HubSpot list's contacts (email + phone). */
+/** Full snapshot of a HubSpot list's contacts (email + phone + email domain). */
 export async function fetchListContacts(
-  token: string,
+  tokenProvider: TokenProvider,
   listId: string
 ): Promise<HubspotListContact[]> {
-  const ids = await fetchListMemberIds(token, listId);
+  const ids = await fetchListMemberIds(tokenProvider, listId);
   if (ids.length === 0) return [];
-  return fetchContactProps(token, ids);
+  return fetchContactProps(tokenProvider, ids);
 }

@@ -1,0 +1,71 @@
+import { describe, it, expect } from "vitest";
+import { classifyDncList } from "../../src/services/hubspot-lists.service";
+import { extractCorporateDomain } from "../../src/services/dnc-sync.service";
+import { suggestSimilar } from "../../src/services/suggest";
+
+describe("classifyDncList", () => {
+  it("classifies (Domain) lists, including client-suffixed names", () => {
+    expect(classifyDncList("TAM - Do Not Contact (Domain)")).toBe("domain");
+    expect(classifyDncList("TAM - Do Not Contact (Domain) | (Kaleidoscope)")).toBe("domain");
+  });
+
+  it("classifies (Individual) lists", () => {
+    expect(classifyDncList("TAM - Do Not Contact (Individual)")).toBe("individual");
+    expect(classifyDncList("TAM - Do Not Contact (Individual) | (CyberNut)")).toBe("individual");
+  });
+
+  it("returns null for unsuffixed / unknown variants", () => {
+    expect(classifyDncList("TAM - Do Not Contact")).toBeNull();
+    expect(classifyDncList("TAM - Do Not Contact (Inbound)")).toBeNull();
+  });
+});
+
+describe("extractCorporateDomain", () => {
+  const c = (over: Partial<Parameters<typeof extractCorporateDomain>[0]> = {}) => ({
+    hubspot_id: "1",
+    email: null,
+    phone: null,
+    email_domain: null,
+    ...over,
+  });
+
+  it("prefers hs_email_domain, normalized", () => {
+    expect(extractCorporateDomain(c({ email_domain: "Acme.COM", email: "x@other.com" }))).toBe("acme.com");
+  });
+
+  it("falls back to the email host", () => {
+    expect(extractCorporateDomain(c({ email: "jane@acme.io" }))).toBe("acme.io");
+  });
+
+  it("excludes free providers so we never block a public domain", () => {
+    expect(extractCorporateDomain(c({ email: "jane@gmail.com" }))).toBeNull();
+    expect(extractCorporateDomain(c({ email_domain: "yahoo.com" }))).toBeNull();
+  });
+
+  it("returns null when there is no usable domain", () => {
+    expect(extractCorporateDomain(c({ email: "not-an-email" }))).toBeNull();
+    expect(extractCorporateDomain(c())).toBeNull();
+  });
+});
+
+describe("suggestSimilar", () => {
+  const candidates = [
+    { id: "hilight", name: "Hilight" },
+    { id: "awarded-software", name: "Awarded Software" },
+    { id: "studentbridge", name: "StudentBridge" },
+    { id: "stellic", name: "Stellic" },
+  ];
+
+  it("suggests the closest slug for a near miss", () => {
+    expect(suggestSimilar("hilightt", candidates)).toContain("hilight");
+    expect(suggestSimilar("hilite", candidates)).toContain("hilight");
+  });
+
+  it("matches on display name too", () => {
+    expect(suggestSimilar("awarded", candidates)).toContain("awarded-software");
+  });
+
+  it("returns nothing for a totally unrelated query", () => {
+    expect(suggestSimilar("zzzzzzzzzz", candidates)).toEqual([]);
+  });
+});

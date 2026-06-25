@@ -5,7 +5,6 @@ generator client {
 datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
 }
 
 model Profile {
@@ -101,6 +100,11 @@ model DncSource {
   client_id        String    @db.Uuid
   client           Client    @relation(fields: [client_id], references: [id], onDelete: Cascade)
   type             String    // 'csv' | 'hubspot_list'
+  // Suppression level for a HubSpot-list source:
+  //   'individual' — exact email/phone match only.
+  //   'domain'     — also suppresses each member's (corporate) email domain.
+  // CSV sources keep the default; they carry whatever identifiers the file has.
+  dnc_level        String    @default("individual")
   label            String?
   hubspot_list_id  String?   // for type = 'hubspot_list'
   active           Boolean   @default(true)

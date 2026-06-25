@@ -247,10 +247,21 @@ If \`SERPER_API_KEY\` is not configured the endpoint returns \`503\` with \`reas
 
 ## Do Not Contact (DNC)
 
-Multi-tenant suppression. Each **client** (identified by \`client_id\`) has its own
-DNC list. Entries can match on **email**, **phone (E.164)**, or **domain**
-(domain entries block every contact at that company). DNC data is loaded from
-CSV uploads and from HubSpot lists (synced on a schedule).
+Multi-tenant suppression. Each **client** (identified by \`client_id\`, its slug)
+has its own DNC list. Entries can match on **email**, **phone (E.164)**, or
+**domain** (a domain entry blocks every contact at that company). DNC data is
+loaded from CSV uploads and from HubSpot lists.
+
+**HubSpot lists are discovered and classified automatically.** Each portal's
+\`TAM - Do Not Contact …\` lists are found by name and classified into two levels:
+- **Individual** (\`… (Individual)\`) — suppresses the exact members' email/phone.
+- **Domain** (\`… (Domain)\`) — additionally suppresses each member's corporate
+  email domain, so any contact at that company is blocked. Free/disposable
+  providers (gmail.com, etc.) are excluded so a public domain is never blocked.
+
+A \`/dnc-check\` matches the incoming email's domain against domain-level entries,
+so domain suppression works even when the caller only sends an email. Lists are
+re-discovered and re-synced on a daily schedule (full snapshot replace per list).
 
 ### 8. DNC Check
 **POST** \`/dnc-check\`
@@ -294,6 +305,10 @@ data. If not suppressed, it returns the contact's cached profile data (if any).
 \`\`\`
 
 **Errors**: \`400\` (missing \`client_id\` or no identifier), \`404\` (unknown/inactive client).
+A \`404\` includes \`suggestions\` — the closest known client handles — when any are similar:
+\`\`\`json
+{ "error": "Unknown or inactive client_id: hilightt", "suggestions": ["hilight"] }
+\`\`\`
 
 ---
 
@@ -311,8 +326,8 @@ Create or update a client (tenant), keyed by \`external_id\`.
 | \`external_id\` | String | **Yes** | The ID used in \`/dnc-check\` payloads. |
 | \`name\` | String | No | Display name. |
 | \`active\` | Boolean | No | Defaults to true. |
-| \`hubspot_portal_id\` | String | No | HubSpot portal ID. |
-| \`hubspot_access_token\` | String | No | HubSpot private-app token (used to read lists). Never returned by the API. |
+| \`hubspot_portal_id\` | String | No | HubSpot portal ID. Tokens are resolved (and refreshed) automatically per portal, so this is all the sync needs. |
+| \`hubspot_access_token\` | String | No | Legacy/optional static token. Not required — the multi-tenant sync resolves a fresh token from \`hubspot_portal_id\`. Never returned by the API. |
 
 ### 10. Get Client
 **GET** \`/admin/clients/:external_id\`
@@ -328,7 +343,11 @@ Returns the client and its DNC sources (with last-sync status). The HubSpot toke
 | \`type\` | String | **Yes** | \`csv\` or \`hubspot_list\`. |
 | \`label\` | String | No | Friendly name. |
 | \`hubspot_list_id\` | String | Yes for \`hubspot_list\` | The HubSpot list to sync. |
+| \`dnc_level\` | String | No | \`individual\` (default) or \`domain\`. Usually set automatically by discovery from the list name. |
 | \`active\` | Boolean | No | Defaults to true. |
+
+> Most HubSpot-list sources are created automatically by **Discover** (below) —
+> manual registration is only needed for custom cases.
 
 ### 12. Import DNC (CSV)
 **POST** \`/admin/dnc/import\`
@@ -352,13 +371,31 @@ Response: \`{ "status": "ok", "source_id": "...", "mode": "replace", "imported":
 ### 13. Sync HubSpot Lists
 **POST** \`/admin/dnc/sync\`
 
-Pulls current HubSpot list memberships into the DNC tables (full snapshot replace per list). Cron-friendly — wire a daily scheduler to this endpoint, or run \`npm run dnc:sync\`.
+Refreshes membership of the **already-registered** HubSpot-list sources (full
+snapshot replace per list). Does not look for new lists — use **Discover** for that.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | \`client_id\` | String | No | Sync one client; omit to sync all active clients. |
 
 Response: \`{ "status": "ok", "scope": "all", "sources_synced": 4, "results": [ ... ] }\`.
+
+### 14. Discover + Sync HubSpot Lists
+**POST** \`/admin/dnc/discover\`
+
+The cron entry point. For each client it re-scans the portal for
+\`TAM - Do Not Contact …\` lists, (re)classifies them as individual/domain,
+registers new sources, **deactivates sources whose list was deleted** (clearing
+their stale entries), then syncs membership. Idempotent and safe to run daily.
+Equivalent CLI: \`npm run dnc:sync\` (also runs discover + sync).
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`client_id\` | String | No | Discover one client; omit for all active clients. |
+
+Response (per client) includes \`sources_active\`, \`deactivated\`, \`unclassified\`
+(lists that matched the prefix but had no Individual/Domain suffix — reported,
+not synced), and the \`sync\` results.
 
 ---
 
