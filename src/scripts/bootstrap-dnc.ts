@@ -14,10 +14,11 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import { clientService } from "../services/client.service";
-import { discoverAndSyncClient } from "../services/dnc-sync.service";
+import { assertSyncEnv, discoverAndSyncClient } from "../services/dnc-sync.service";
 import { loadRegistry } from "../config/registry";
 
 async function main() {
+  assertSyncEnv();
   const onlySlug = process.argv[2];
   const registry = loadRegistry();
 

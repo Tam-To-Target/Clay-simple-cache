@@ -15,6 +15,7 @@ dotenv.config();
 
 import { clientService } from "../services/client.service";
 import {
+  assertSyncEnv,
   discoverAndSyncAll,
   discoverAndSyncClient,
   DiscoverResult,
@@ -22,19 +23,24 @@ import {
 } from "../services/dnc-sync.service";
 
 async function main() {
+  assertSyncEnv();
   const slug = process.argv[2];
 
   let discover: DiscoverResult[];
   let sync: SourceSyncResult[];
 
   if (slug) {
+    console.log(`Starting DNC discover+sync for client "${slug}"…`);
     const client = await clientService.getByExternalId(slug);
     if (!client) throw new Error(`Unknown client_id: ${slug}`);
     const r = await discoverAndSyncClient(client);
     discover = [r.discover];
     sync = r.sync;
   } else {
-    const r = await discoverAndSyncAll();
+    console.log("Starting DNC discover+sync for all active clients…");
+    const r = await discoverAndSyncAll((i, total, s, entries, error) => {
+      console.log(`  [${i}/${total}] ${s}: ${entries} entries${error ? ` — ERROR: ${error}` : ""}`);
+    });
     discover = r.discover;
     sync = r.sync;
   }

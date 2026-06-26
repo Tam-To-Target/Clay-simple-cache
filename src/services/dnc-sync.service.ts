@@ -38,6 +38,22 @@ export function dncListPrefix(): string {
 }
 
 /**
+ * Fail fast with a clear message if the env a sync run needs is missing.
+ * Without this, a missing var dies silently on the first DB/provisioner call —
+ * which is exactly how the cron service failed when its variables weren't set.
+ */
+export function assertSyncEnv(): void {
+  const required = ["DATABASE_URL", "HUBSPOT_PROVISIONER_URL", "HUBSPOT_PROVISIONER_API_SECRET"];
+  const missing = required.filter((k) => !process.env[k]);
+  if (missing.length) {
+    throw new Error(
+      `Missing required environment variable(s): ${missing.join(", ")}. ` +
+        `Set them on this service (a Railway cron service does NOT inherit the web service's variables).`
+    );
+  }
+}
+
+/**
  * Extract a member's corporate email domain for domain-level suppression.
  * Prefers HubSpot's computed hs_email_domain, falls back to the email host.
  * Free/disposable providers (gmail.com, etc.) are excluded so we never suppress
@@ -253,17 +269,21 @@ export async function syncAllHubspotSources(): Promise<SourceSyncResult[]> {
 }
 
 /** Re-discover + sync every active client (the daily job). */
-export async function discoverAndSyncAll(): Promise<{
+export async function discoverAndSyncAll(
+  onClient?: (index: number, total: number, slug: string, entries: number, error?: string) => void
+): Promise<{
   discover: DiscoverResult[];
   sync: SourceSyncResult[];
 }> {
   const clients = await prisma.client.findMany({ where: { active: true } });
   const discover: DiscoverResult[] = [];
   const sync: SourceSyncResult[] = [];
-  for (const client of clients) {
-    const r = await discoverAndSyncClient(client);
+  for (let i = 0; i < clients.length; i++) {
+    const r = await discoverAndSyncClient(clients[i]);
     discover.push(r.discover);
     sync.push(...r.sync);
+    const entries = r.sync.filter((s) => s.status === "ok").reduce((n, s) => n + s.entry_count, 0);
+    onClient?.(i + 1, clients.length, clients[i].external_id, entries, r.discover.error);
   }
   return { discover, sync };
 }
