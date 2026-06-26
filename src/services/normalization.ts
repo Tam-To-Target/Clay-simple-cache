@@ -63,10 +63,15 @@ export function normalizeLinkedIn(url: string): string | null {
 }
 
 /**
- * Normalizes phone number to E.164
- * Default country: MX
+ * Normalizes phone number to E.164.
+ *
+ * Default country is US (+1): the data is US-centric, and an unqualified
+ * national number must be assumed to belong to some country. A wrong default
+ * silently mangles every bare number (e.g. a US 703… became +52703… under the
+ * old MX default), which breaks phone-based DNC matching. Numbers already in
+ * E.164 (with a leading +) keep their own country code regardless of this.
  */
-export function normalizePhone(phone: string, defaultCountry: CountryCode = 'MX'): { e164: string, national: string } | null {
+export function normalizePhone(phone: string, defaultCountry: CountryCode = 'US'): { e164: string, national: string } | null {
     try {
         const phoneNumber = parsePhoneNumber(phone, defaultCountry);
         if (phoneNumber && phoneNumber.isValid()) {

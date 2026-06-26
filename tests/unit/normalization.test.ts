@@ -88,6 +88,12 @@ describe("normalizePhone", () => {
     expect(result).not.toBeNull();
     expect(result!.e164).toBe("+14155551234");
   });
+
+  it("defaults a bare national number to US (+1), not MX", () => {
+    const result = normalizePhone("7032283000");
+    expect(result).not.toBeNull();
+    expect(result!.e164).toBe("+17032283000");
+  });
 });
 
 describe("normalizeDomain", () => {
