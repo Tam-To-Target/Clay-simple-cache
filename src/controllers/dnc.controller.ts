@@ -50,6 +50,21 @@ export const dncController = {
       const ids = normalizeCheckIdentifiers({ email, phone, domain });
       const match = await dncService.findMatch(client.id, ids);
 
+      // Cache the checked contact as a profile (best-effort, never throws) so a
+      // later GET /profiles can return it with whatever identity we were given.
+      // Skipped automatically when only a domain is provided (no profile key).
+      await profileService.recordProfile(
+        { email: ids.email || undefined, phone_e164: ids.phone_e164 || undefined },
+        {
+          ...(ids.domain ? { domain: ids.domain } : {}),
+          ...(ids.email_domain ? { email_domain: ids.email_domain } : {}),
+          source: "dnc_check",
+          client_id,
+          last_dnc_status: match ? "do_not_contact" : "contactable",
+          checked_at: new Date().toISOString(),
+        }
+      );
+
       if (match) {
         const { entry, matchedOn, matchedValue } = match;
         res.json({

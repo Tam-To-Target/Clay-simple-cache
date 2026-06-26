@@ -224,6 +224,10 @@ Check whether a contact is on a client's Do Not Contact list. If suppressed, the
 response says so (with the reason and source) and **does not** return contact
 data. If not suppressed, it returns the contact's cached profile data (if any).
 
+Every check also **caches the contact as a profile** (best-effort) using whatever
+identity it carries (\`email\` / \`phone\`), so it becomes retrievable via
+\`GET /profiles\`. Domain-only checks are not cached (no profile key).
+
 **Request Body (JSON)**:
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -362,6 +366,11 @@ Create a contact in the client's HubSpot portal. If a contact with the same
 \`email\` already exists it is **updated** instead (idempotent). The token for the
 client's portal is resolved automatically.
 
+The pushed lead is also **cached as a profile** (email / phone / LinkedIn as
+identity, plus all submitted properties and attribution under \`data\`), so it is
+immediately retrievable via \`GET /profiles\`. The cached profile id is returned as
+\`cached_profile_id\`.
+
 **Request Body (JSON)**:
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -384,7 +393,8 @@ client's portal is resolved automatically.
   "client_id": "tam-to-target",
   "hubspot_portal_id": "244264386",
   "contact_id": "508943115974",
-  "dnc_checked": true
+  "dnc_checked": true,
+  "cached_profile_id": "uuid-string"
 }
 \`\`\`
 \`created\` is \`false\` when an existing contact was updated.

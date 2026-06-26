@@ -1,6 +1,8 @@
 import { Request, Response } from "express";
 import { clientService, clientSuggestions } from "../services/client.service";
 import { dncService, normalizeCheckIdentifiers } from "../services/dnc.service";
+import { profileService } from "../services/profile.service";
+import { normalizeEmail, normalizePhone, normalizeLinkedIn } from "../services/normalization";
 import {
   upsertHubspotContact,
   normalizeCampaignType,
@@ -107,6 +109,29 @@ export const hubspotController = {
       }
 
       const result = await upsertHubspotContact(client.hubspot_portal_id, properties);
+
+      // Cache the pushed lead as a profile so GET /profiles can return it later
+      // (best-effort — recordProfile never throws, so it can't fail the push).
+      const phone = properties.phone ? normalizePhone(String(properties.phone)) : null;
+      const linkedinUrl = properties.linkedin_url ? String(properties.linkedin_url) : undefined;
+      const cached = await profileService.recordProfile(
+        {
+          email: properties.email ? normalizeEmail(String(properties.email)) : undefined,
+          phone_e164: phone?.e164,
+          linkedin_url: linkedinUrl,
+          linkedin_slug: linkedinUrl ? normalizeLinkedIn(linkedinUrl) || undefined : undefined,
+        },
+        {
+          ...properties,
+          ...(phone?.national ? { phone_national: phone.national } : {}),
+          source: "hubspot_push",
+          client_id,
+          hubspot_portal_id: client.hubspot_portal_id,
+          hubspot_contact_id: result.id,
+          pushed_at: new Date().toISOString(),
+        }
+      );
+
       res.json({
         status: "ok",
         pushed: true,
@@ -115,6 +140,7 @@ export const hubspotController = {
         hubspot_portal_id: client.hubspot_portal_id,
         contact_id: result.id,
         dnc_checked: !!check_dnc,
+        cached_profile_id: cached.profile_id,
       });
     } catch (error: any) {
       // Surface HubSpot 4xx (e.g. a bad property name) as a client error.
