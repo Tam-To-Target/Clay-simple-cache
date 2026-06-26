@@ -106,19 +106,70 @@ async function rawFetch(path: string, token: string, init?: RequestInit): Promis
   });
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
 /**
- * Fetch with automatic recovery from token expiry: a long sync can outlive the
- * token it started with, so on a 401 we force-refresh once and retry. Request
- * bodies are JSON strings, so re-sending `init` is safe.
+ * Minimum spacing between HubSpot requests, process-wide. HubSpot enforces a
+ * TEN_SECONDLY_ROLLING cap (~10 req/s per portal); a large list sync (thousands
+ * of membership pages + batch reads) blows past it and gets HTTP 429. Spacing
+ * requests ~8/s keeps us safely under the limit. Serialized via a promise chain
+ * so concurrent callers queue instead of all firing at once.
+ */
+const MIN_REQUEST_SPACING_MS = 125;
+const MAX_RETRIES = 5;
+let throttleChain: Promise<void> = Promise.resolve();
+
+function throttle(): Promise<void> {
+  const prior = throttleChain;
+  throttleChain = prior.then(() => sleep(MIN_REQUEST_SPACING_MS));
+  return prior;
+}
+
+/**
+ * Fetch with automatic recovery:
+ *  - 401: a long sync can outlive its token → force-refresh once and retry.
+ *  - 429: respect HubSpot's rate limit → wait Retry-After (or backoff) and retry.
+ *  - 5xx (502/503/504): transient gateway blips → exponential backoff and retry.
+ * Request bodies are JSON strings, so re-sending `init` is safe.
  */
 async function hsFetch(
   path: string,
   tokenProvider: TokenProvider,
   init?: RequestInit
 ): Promise<Response> {
-  const res = await rawFetch(path, await tokenProvider(), init);
-  if (res.status !== 401) return res;
-  return rawFetch(path, await tokenProvider(true), init);
+  let refreshed = false;
+  let forceToken = false;
+  let lastRes: Response | null = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    await throttle();
+    const token = await tokenProvider(forceToken);
+    forceToken = false;
+    const res = await rawFetch(path, token, init);
+
+    if (res.status === 401 && !refreshed) {
+      // Token expired mid-run — mint a fresh one and retry immediately.
+      refreshed = true;
+      forceToken = true;
+      lastRes = res;
+      continue;
+    }
+
+    if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
+      lastRes = res;
+      if (attempt === MAX_RETRIES) return res;
+      const retryAfter = Number(res.headers.get("retry-after"));
+      const backoff = Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter * 1000
+        : Math.min(1000 * 2 ** attempt, 16_000);
+      await sleep(backoff);
+      continue;
+    }
+
+    return res;
+  }
+
+  return lastRes as Response;
 }
 
 /** Page through a list's memberships and return all contact record IDs. */
