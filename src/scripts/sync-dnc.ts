@@ -49,12 +49,23 @@ async function main() {
   const errored = sync.filter((r) => r.status === "error");
   const totalEntries = ok.reduce((s, r) => s + r.entry_count, 0);
   const discoverErrors = discover.filter((d) => d.status === "error");
+  // Clients/sources whose HubSpot access is gone — expected operational events,
+  // reported as warnings but NOT counted as failures.
+  const noAccess = discover.filter((d) => d.status === "no_access");
 
   console.log(
-    `DNC sync complete: ${sync.length} source(s), ${ok.length} ok, ${errored.length} error(s), ${totalEntries} entries.`
+    `DNC sync complete: ${sync.length} source(s), ${ok.length} ok, ${errored.length} error(s), ` +
+      `${noAccess.length} no-access, ${totalEntries} entries.`
   );
+
+  if (noAccess.length) {
+    console.log(`⚠ Skipped (HubSpot access revoked — uninstalled or grant gone):`);
+    for (const d of noAccess) {
+      console.log(`  - [${d.client_external_id}] portal ${d.portal_id ?? "-"}: ${d.error ?? "no access"}`);
+    }
+  }
   for (const r of sync) {
-    const tag = r.status === "ok" ? "✓" : r.status === "skipped" ? "–" : "✗";
+    const tag = r.status === "ok" ? "✓" : r.status === "skipped" ? "–" : r.status === "no_access" ? "⊘" : "✗";
     console.log(
       `  ${tag} [${r.client_external_id}] list ${r.hubspot_list_id ?? "-"} [${r.level}] (${r.label ?? "no label"}): ` +
         `${r.entry_count} entries${r.error ? ` — ${r.error}` : ""}`

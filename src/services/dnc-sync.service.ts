@@ -6,7 +6,7 @@ import {
   searchDncLists,
   HubspotListContact,
 } from "./hubspot-lists.service";
-import { getValidToken } from "./hubspot-token.service";
+import { getValidToken, HubspotAccessError } from "./hubspot-token.service";
 import { normalizeDomain } from "./normalization";
 import { checkDisposable, checkFreeProvider } from "../email-finder/static-lists";
 
@@ -16,7 +16,7 @@ export interface SourceSyncResult {
   hubspot_list_id: string | null;
   label: string | null;
   level: string;
-  status: "ok" | "error" | "skipped";
+  status: "ok" | "error" | "skipped" | "no_access";
   entry_count: number;
   domain_count: number;
   error?: string;
@@ -25,7 +25,7 @@ export interface SourceSyncResult {
 export interface DiscoverResult {
   client_external_id: string;
   portal_id: string | null;
-  status: "ok" | "error";
+  status: "ok" | "error" | "no_access";
   sources_active: number;
   deactivated: { list_id: string | null; name: string | null }[];
   /** Lists that matched the prefix but had no Individual/Domain suffix — reported, not synced. */
@@ -157,9 +157,12 @@ export async function syncHubspotSource(
     await recordSync(source.id, result);
     return result;
   } catch (err: any) {
-    // A deleted/renamed list (e.g. HTTP 404) lands here — recorded per-source,
-    // never fatal to the rest of the run.
-    const result = { ...base, status: "error" as const, error: err?.message || String(err) };
+    // Client revoked HubSpot access (app uninstalled / grant gone): skip this
+    // source, never fail the run.
+    const status = err instanceof HubspotAccessError ? ("no_access" as const) : ("error" as const);
+    // A deleted/renamed list (e.g. HTTP 404) also lands here — recorded
+    // per-source, never fatal to the rest of the run.
+    const result = { ...base, status, error: err?.message || String(err) };
     await recordSync(source.id, result);
     return result;
   }
@@ -202,7 +205,9 @@ export async function discoverClient(client: Client): Promise<DiscoverResult> {
     const portalId = client.hubspot_portal_id;
     lists = await searchDncLists((force) => getValidToken(portalId, { force }), dncListPrefix());
   } catch (err: any) {
-    return { ...base, status: "error", error: err?.message || String(err) };
+    // Access revoked (app uninstalled / grant gone) → skip, not a hard error.
+    const status = err instanceof HubspotAccessError ? ("no_access" as const) : ("error" as const);
+    return { ...base, status, error: err?.message || String(err) };
   }
 
   const classified = lists.filter((l) => l.level);

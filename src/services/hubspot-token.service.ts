@@ -18,6 +18,35 @@ interface CachedToken {
   expiresAtMs: number;
 }
 
+/**
+ * Raised when a portal's HubSpot access is gone for good (app uninstalled or
+ * OAuth grant revoked) rather than a transient blip. Callers treat this as a
+ * skip-this-client signal, NOT a hard failure — one customer revoking access
+ * must never fail the whole sync run.
+ */
+export class HubspotAccessError extends Error {
+  constructor(public portalId: string, public status: number, message: string) {
+    super(message);
+    this.name = "HubspotAccessError";
+  }
+}
+
+/**
+ * Does a provisioner failure mean access is permanently gone? A revoked/missing
+ * OAuth grant surfaces as 401/403/404, or — as HubSpot reports it — a 500 whose
+ * body carries invalid_grant / BAD_REFRESH_TOKEN. Anything else is treated as
+ * transient.
+ */
+function isAccessRevoked(status: number, body: string): boolean {
+  if (status === 401 || status === 403 || status === 404) return true;
+  const b = (body || "").toLowerCase();
+  return (
+    b.includes("invalid_grant") ||
+    b.includes("bad_refresh_token") ||
+    b.includes("missing or invalid refresh token")
+  );
+}
+
 const cache = new Map<string, CachedToken>();
 // Treat tokens expiring within 2 min as already expired. Syncing one large list
 // can take a while, so we want comfortable runway before starting one.
@@ -50,12 +79,14 @@ export async function getValidToken(
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`Provisioner token fetch failed for portal ${pid}: HTTP ${res.status} ${body}`);
+    const msg = `Provisioner token fetch failed for portal ${pid}: HTTP ${res.status} ${body}`;
+    if (isAccessRevoked(res.status, body)) throw new HubspotAccessError(pid, res.status, msg);
+    throw new Error(msg);
   }
 
   const json = (await res.json()) as { accessToken?: string; expiresAt?: string | null };
   if (!json.accessToken) {
-    throw new Error(`Provisioner returned no accessToken for portal ${pid}`);
+    throw new HubspotAccessError(pid, res.status, `Provisioner returned no accessToken for portal ${pid}`);
   }
 
   const expiresAtMs = json.expiresAt ? new Date(json.expiresAt).getTime() : now + 25 * 60_000;

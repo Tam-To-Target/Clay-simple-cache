@@ -376,6 +376,9 @@ export const dncController = {
         scope: "all",
         clients_discovered: result.discover.length,
         sources_synced: result.sync.length,
+        sources_ok: result.sync.filter((s) => s.status === "ok").length,
+        sources_error: result.sync.filter((s) => s.status === "error").length,
+        clients_no_access: result.discover.filter((d) => d.status === "no_access").map((d) => d.client_external_id),
         ...result,
       });
     } catch (error: any) {

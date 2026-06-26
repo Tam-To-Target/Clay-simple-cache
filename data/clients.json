@@ -44,13 +44,6 @@
       "domain": "mastra.ai"
     },
     {
-      "slug": "nido-learning",
-      "portal_id": "46773168",
-      "name": "Nido Learning",
-      "client_reference_name": "Nido",
-      "domain": "nidolearning.com"
-    },
-    {
       "slug": "pathwise",
       "portal_id": "2100863",
       "name": "Pathwise",

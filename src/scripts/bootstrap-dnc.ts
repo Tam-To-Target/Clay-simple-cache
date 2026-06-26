@@ -34,6 +34,7 @@ async function main() {
 
   const unclassified: { client: string; list_id: string; name: string }[] = [];
   const errors: { client: string; error: string }[] = [];
+  const noAccess: { client: string; error: string }[] = [];
   let totalEntries = 0;
   let totalDomains = 0;
 
@@ -45,6 +46,12 @@ async function main() {
     });
 
     const { discover, sync } = await discoverAndSyncClient(client);
+
+    if (discover.status === "no_access") {
+      noAccess.push({ client: rc.slug, error: discover.error || "access revoked" });
+      console.log(`⊘ ${rc.slug} — HubSpot access revoked, skipped`);
+      continue;
+    }
 
     if (discover.status === "error") {
       errors.push({ client: rc.slug, error: discover.error || "discover failed" });
@@ -94,6 +101,11 @@ async function main() {
   if (unclassified.length) {
     console.log(`\n⚠ Unclassified lists (matched the prefix, NOT synced — review the name suffix):`);
     for (const u of unclassified) console.log(`  - [${u.client}] list ${u.list_id}: "${u.name}"`);
+  }
+
+  if (noAccess.length) {
+    console.log(`\n⊘ Skipped (HubSpot access revoked — uninstalled or grant gone):`);
+    for (const n of noAccess) console.log(`  - [${n.client}] ${n.error}`);
   }
 
   if (registry.unmapped_portals.length) {
