@@ -85,8 +85,9 @@ model Client {
   created_at           DateTime @default(now()) @db.Timestamptz(6)
   updated_at           DateTime @updatedAt @db.Timestamptz(6)
 
-  dnc_sources DncSource[]
-  dnc_entries DncEntry[]
+  dnc_sources         DncSource[]
+  dnc_entries         DncEntry[]
+  phoneburner_members PhoneburnerMember[]
 
   @@index([external_id])
   @@map("clients")
@@ -150,4 +151,66 @@ model DncEntry {
   @@index([client_id, domain])
   @@index([source_id])
   @@map("dnc_entries")
+}
+
+// ─── PhoneBurner DNC purge (see PHONEBURNER_DNC_PURGE_PLAN.md) ───────────────
+
+// Which PhoneBurner members dial for which client. Populated from the SDR Launch
+// join (calls -> sdrs.provider_user_ids.phoneburner). Tokens are NEVER stored —
+// resolved at runtime from the admin token (PHONEBURNER_ADMIN_TOKEN).
+model PhoneburnerMember {
+  id            String    @id @default(uuid()) @db.Uuid
+  client_id     String    @db.Uuid
+  client        Client    @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  pb_member_id  String // PhoneBurner user_id
+  pb_username   String? // email, for logs
+  active        Boolean   @default(true) // false = stop scrubbing (left team / API off)
+  api_access_ok Boolean   @default(false) // last run saw a working token (else 403)
+  last_run_at   DateTime? @db.Timestamptz(6)
+  created_at    DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime  @updatedAt @db.Timestamptz(6)
+
+  @@unique([client_id, pb_member_id])
+  @@index([client_id])
+  @@map("phoneburner_members")
+}
+
+// Audit + backup of every deletion. `snapshot` holds the full PB contact JSON so
+// a delete is re-importable. Doubles as idempotency + reporting.
+model PhoneburnerDeletion {
+  id            String   @id @default(uuid()) @db.Uuid
+  client_id     String   @db.Uuid
+  pb_member_id  String
+  pb_contact_id String
+  matched_on    String // 'email' | 'phone' | 'domain' (+combos)
+  matched_value String?
+  snapshot      Json     @default("{}") // full contact record at delete time
+  status        String // 'deleted' | 'failed' | 'dry_run'
+  http_status   Int?
+  error         String?
+  run_id        String?  @db.Uuid
+  deleted_at    DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([client_id, pb_contact_id])
+  @@index([run_id])
+  @@map("phoneburner_deletions")
+}
+
+// One row per cron run (observability + alerting).
+model PhoneburnerPurgeRun {
+  id                String    @id @default(uuid()) @db.Uuid
+  started_at        DateTime  @default(now()) @db.Timestamptz(6)
+  finished_at       DateTime? @db.Timestamptz(6)
+  dry_run           Boolean   @default(false)
+  clients_processed Int       @default(0)
+  members_processed Int       @default(0)
+  members_skipped   Int       @default(0) // API access off, no token, aborted by gate
+  contacts_scanned  Int       @default(0)
+  collisions_found  Int       @default(0)
+  deleted           Int       @default(0)
+  failed            Int       @default(0)
+  status            String    @default("running") // running | ok | partial | error
+  notes             String?
+
+  @@map("phoneburner_purge_runs")
 }
