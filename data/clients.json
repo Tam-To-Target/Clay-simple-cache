@@ -1,92 +1,250 @@
 {
-  "generated_at": "2026-06-25T18:31:21.010Z",
+  "generated_at": "2026-06-27T16:53:22.343Z",
   "clients": [
     {
       "slug": "awarded-software",
       "portal_id": "242448990",
       "name": "Awarded Software",
       "client_reference_name": "Awarded",
-      "domain": "awardedsoftware.com"
+      "domain": "awardedsoftware.com",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1252045468",
+          "name": "Bessie Marvin",
+          "username": "bessie@tamtotarget.com",
+          "status": "active"
+        }
+      ]
     },
     {
       "slug": "club-hub",
       "portal_id": "23342274",
       "name": "Club Hub",
       "client_reference_name": "Club Hub",
-      "domain": "clubhub.co"
+      "domain": "clubhub.co",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1250993178",
+          "name": "Prince Derek",
+          "username": "prince@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1285763294",
+          "name": "Sara Johnson",
+          "username": "sara@tamtotarget.com",
+          "status": "active"
+        }
+      ]
     },
     {
       "slug": "cybernut",
       "portal_id": "45274441",
       "name": "CyberNut",
       "client_reference_name": "CyberNut",
-      "domain": "cybernut.ai"
+      "domain": "cybernut.ai",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1255506787",
+          "name": "Anna Reed",
+          "username": "anna@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1255565269",
+          "name": "John Thomas",
+          "username": "john@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1270387084",
+          "name": "Nathan Pierce",
+          "username": "nathan@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1281379796",
+          "name": "David Smith",
+          "username": "david@tamtotarget.com",
+          "status": "active"
+        }
+      ]
     },
     {
       "slug": "hilight",
       "portal_id": "22493085",
       "name": "Hilight",
       "client_reference_name": "Hilight",
-      "domain": "hilightedu.com"
+      "domain": "hilightedu.com",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1287143131",
+          "name": "Emily Adams",
+          "username": "emily.adams@tamtotarget.com",
+          "status": "active"
+        }
+      ]
     },
     {
       "slug": "kaleidoscope",
       "portal_id": "21369353",
       "name": "Kaleidoscope",
       "client_reference_name": "Kaleidoscope",
-      "domain": "mykaleidoscope.com"
+      "domain": "mykaleidoscope.com",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1246360446",
+          "name": "Hazel John",
+          "username": "hazel@rhosales.com",
+          "status": "active"
+        }
+      ]
     },
     {
       "slug": "mastra",
       "portal_id": "47815345",
       "name": "Mastra AI",
       "client_reference_name": "Mastra",
-      "domain": "mastra.ai"
+      "domain": "mastra.ai",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1285763356",
+          "name": "Mary Brown",
+          "username": "mary@tamtotarget.com",
+          "status": "active"
+        }
+      ]
     },
     {
       "slug": "pathwise",
       "portal_id": "2100863",
       "name": "Pathwise",
       "client_reference_name": "Pathwise",
-      "domain": "transact.com"
+      "domain": "transact.com",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1246360433",
+          "name": "Lily Marks",
+          "username": "lily@rhosales.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1246360440",
+          "name": "Michael Davids",
+          "username": "michael@rhosales.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1270386519",
+          "name": "Steve Johnson",
+          "username": "steve@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1270386525",
+          "name": "Sarah Miller",
+          "username": "sarah@tamtotarget.com",
+          "status": "active"
+        }
+      ]
     },
     {
       "slug": "reddrop",
       "portal_id": "245381868",
       "name": "RedDrop",
       "client_reference_name": "RedDrop",
-      "domain": "tryreddrop.com"
+      "domain": "tryreddrop.com",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1270387234",
+          "name": "Zoey Brown",
+          "username": "zoey@tamtotarget.com",
+          "status": "active"
+        }
+      ]
     },
     {
       "slug": "scantron",
       "portal_id": "47008204",
       "name": "Scantron",
       "client_reference_name": "Scantron",
-      "domain": "scantron.com"
+      "domain": "scantron.com",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1250993178",
+          "name": "Prince Derek",
+          "username": "prince@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1270387106",
+          "name": "Melanie Walker",
+          "username": "melanie@tamtotarget.com",
+          "status": "active"
+        }
+      ]
     },
     {
       "slug": "stellic",
       "portal_id": "3313790",
       "name": "Stellic",
       "client_reference_name": "Stellic",
-      "domain": "stellic.com"
+      "domain": "stellic.com",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1255725556",
+          "name": "Hannah Collins",
+          "username": "hannah@tamtotarget.com",
+          "status": "active"
+        }
+      ]
     },
     {
       "slug": "studentbridge",
       "portal_id": "20524720",
       "name": "StudentBridge",
       "client_reference_name": "StudentBridge",
-      "domain": "studentbridge.com"
+      "domain": "studentbridge.com",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1270387091",
+          "name": "Olivia Reed",
+          "username": "olivia@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1276432825",
+          "name": "Caleb Brown",
+          "username": "caleb@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1278090494",
+          "name": "Heather Grey",
+          "username": "heather@tamtotarget.com",
+          "status": "active"
+        }
+      ]
     },
     {
       "slug": "tam-to-target",
       "portal_id": "244264386",
       "name": "TAM to Target",
       "client_reference_name": "TAMtoTarget",
-      "domain": "tamtotarget.com"
+      "domain": "tamtotarget.com",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1279015036",
+          "name": "Yushri Abrahams",
+          "username": "yushri@tamtotarget.com",
+          "status": "active"
+        }
+      ]
     }
   ],
   "unmapped_portals": [
+    "242827393",
+    "3975112",
     "85896"
   ]
 }
