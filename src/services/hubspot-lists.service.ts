@@ -125,9 +125,13 @@ function throttle(): Promise<void> {
   return prior;
 }
 
+/** A token can expire more than once over a very long paged sync. */
+const MAX_TOKEN_REFRESHES = 3;
+
 /**
  * Fetch with automatic recovery:
- *  - 401: a long sync can outlive its token → force-refresh once and retry.
+ *  - 401: a long sync can outlive its token → force-refresh and retry (up to
+ *    MAX_TOKEN_REFRESHES times, so a token that expires twice still recovers).
  *  - 429: respect HubSpot's rate limit → wait Retry-After (or backoff) and retry.
  *  - 5xx (502/503/504): transient gateway blips → exponential backoff and retry.
  * Request bodies are JSON strings, so re-sending `init` is safe.
@@ -137,7 +141,7 @@ async function hsFetch(
   tokenProvider: TokenProvider,
   init?: RequestInit
 ): Promise<Response> {
-  let refreshed = false;
+  let refreshes = 0;
   let forceToken = false;
   let lastRes: Response | null = null;
 
@@ -147,9 +151,9 @@ async function hsFetch(
     forceToken = false;
     const res = await rawFetch(path, token, init);
 
-    if (res.status === 401 && !refreshed) {
+    if (res.status === 401 && refreshes < MAX_TOKEN_REFRESHES) {
       // Token expired mid-run — mint a fresh one and retry immediately.
-      refreshed = true;
+      refreshes++;
       forceToken = true;
       lastRes = res;
       continue;

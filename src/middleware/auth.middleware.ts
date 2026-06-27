@@ -1,4 +1,16 @@
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
+
+/** Length-independent constant-time string compare (avoids leaking the key via timing). */
+function safeEqual(a: string, b: string): boolean {
+    const ab = Buffer.from(a, 'utf8');
+    const bb = Buffer.from(b, 'utf8');
+    // Hash both to a fixed length so timingSafeEqual never sees mismatched sizes
+    // (which would itself throw/short-circuit and leak length).
+    const ah = crypto.createHash('sha256').update(ab).digest();
+    const bh = crypto.createHash('sha256').update(bb).digest();
+    return crypto.timingSafeEqual(ah, bh);
+}
 
 export const authMiddleware = (req: Request, res: Response, next: NextFunction): void => {
     const authHeader = req.headers['authorization'];
@@ -16,7 +28,7 @@ export const authMiddleware = (req: Request, res: Response, next: NextFunction):
     }
 
     const token = authHeader.slice(7);
-    if (token !== validKey) {
+    if (!safeEqual(token, validKey)) {
         res.status(401).json({ error: 'Unauthorized: Invalid API Key' });
         return;
     }

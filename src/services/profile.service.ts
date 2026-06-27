@@ -96,13 +96,15 @@ export const profileService = {
      *
      * Resilient by design — this is best-effort enrichment that must NEVER fail
      * the caller's primary action:
-     *  - Resolves by ANY provided key (email → linkedin → phone), so a contact
-     *    that shares a key with an existing profile updates it instead of
-     *    colliding on the unique constraint.
-     *  - Only FILLS missing identity columns (never overwrites an existing one),
-     *    which avoids touching keys owned by other profiles.
-     *  - Catches unique-constraint races/edge cases and degrades to a data-only
-     *    merge (or a no-op) rather than throwing.
+     *  - Resolves ALL profiles owning any provided key (one OR query) and merges
+     *    the data into every one of them, so the record stays reachable by any
+     *    key even when identity is split across rows by the unique constraints
+     *    (no data loss).
+     *  - Fills a missing identity column on the primary row only when no other
+     *    matched row already owns that value, so it never collides on a unique
+     *    constraint owned by a different profile.
+     *  - Catches unique-constraint races and DB errors, logs, and degrades to a
+     *    data-only merge (or a no-op) rather than throwing.
      */
     async recordProfile(
         identity: { email?: string | null; phone_e164?: string | null; linkedin_url?: string | null; linkedin_slug?: string | null },
@@ -115,44 +117,71 @@ export const profileService = {
             linkedin_slug: identity.linkedin_slug || undefined,
         };
 
+        const or: Prisma.ProfileWhereInput[] = [];
+        if (keys.email) or.push({ email: keys.email });
+        if (keys.phone_e164) or.push({ phone_e164: keys.phone_e164 });
+        if (keys.linkedin_url) or.push({ linkedin_url: keys.linkedin_url });
+        if (keys.linkedin_slug) or.push({ linkedin_slug: keys.linkedin_slug });
+
         // A profile needs at least one identity key; nothing to cache otherwise.
-        if (!keys.email && !keys.phone_e164 && !keys.linkedin_url && !keys.linkedin_slug) {
-            return { profile_id: null, created: false };
-        }
+        if (or.length === 0) return { profile_id: null, created: false };
+
+        const mergeInto = async (id: string, existing: any): Promise<void> => {
+            try {
+                await this.updateProfile(id, { data: this.mergeData(existing, data) } as any);
+            } catch (err: any) {
+                console.error(`[recordProfile] data merge failed for ${id}:`, err?.message || err);
+            }
+        };
 
         try {
-            const { profile } = await this.findProfile(keys);
+            const matches = await prisma.profile.findMany({ where: { OR: or } });
 
-            if (profile) {
-                const updates: any = { data: this.mergeData(profile.data, data) };
-                // Fill ONLY missing identity columns — never overwrite one that's
-                // set (it may be owned by this or, on conflict, another profile).
-                if (keys.email && !profile.email) updates.email = keys.email;
-                if (keys.linkedin_slug && !profile.linkedin_slug) updates.linkedin_slug = keys.linkedin_slug;
-                if (keys.linkedin_url && !profile.linkedin_url) updates.linkedin_url = keys.linkedin_url;
-                if (keys.phone_e164 && !profile.phone_e164) updates.phone_e164 = keys.phone_e164;
-
+            if (matches.length === 0) {
                 try {
-                    await this.updateProfile(profile.id, updates);
-                } catch {
-                    // A filled key collided with another profile — keep the merge.
-                    await this.updateProfile(profile.id, { data: updates.data } as any);
+                    const created = await this.createProfile({ ...keys, data: data as Prisma.InputJsonValue });
+                    return { profile_id: created.id, created: true };
+                } catch (err: any) {
+                    // Lost a create race: another writer claimed one of these keys.
+                    console.error("[recordProfile] create race, merging into existing:", err?.message || err);
+                    const again = await prisma.profile.findMany({ where: { OR: or } });
+                    for (const p of again) await mergeInto(p.id, p.data);
+                    return { profile_id: again[0]?.id ?? null, created: false };
                 }
-                return { profile_id: profile.id, created: false };
             }
 
-            const created = await this.createProfile({ ...keys, data: data as Prisma.InputJsonValue });
-            return { profile_id: created.id, created: true };
-        } catch {
-            // Lost a create race (or a key is owned elsewhere): re-resolve and
-            // merge data into whatever now exists; give up quietly if not.
-            try {
-                const { profile } = await this.findProfile(keys);
-                if (profile) {
-                    await this.updateProfile(profile.id, { data: this.mergeData(profile.data, data) } as any);
-                    return { profile_id: profile.id, created: false };
+            // Which key values are already owned by SOME matched row — used to
+            // avoid filling the primary with a value owned by a different row.
+            const owned = new Set<string>();
+            for (const p of matches) {
+                if (p.email) owned.add(`email:${p.email}`);
+                if (p.phone_e164) owned.add(`phone:${p.phone_e164}`);
+                if (p.linkedin_slug) owned.add(`lslug:${p.linkedin_slug}`);
+                if (p.linkedin_url) owned.add(`lurl:${p.linkedin_url}`);
+            }
+
+            const primary = matches.find((p) => keys.email && p.email === keys.email) ?? matches[0];
+
+            // Merge the data into every matched row so it is reachable by any key.
+            for (const p of matches) {
+                const updates: any = { data: this.mergeData(p.data, data) };
+                if (p.id === primary.id) {
+                    if (keys.email && !p.email && !owned.has(`email:${keys.email}`)) updates.email = keys.email;
+                    if (keys.phone_e164 && !p.phone_e164 && !owned.has(`phone:${keys.phone_e164}`)) updates.phone_e164 = keys.phone_e164;
+                    if (keys.linkedin_slug && !p.linkedin_slug && !owned.has(`lslug:${keys.linkedin_slug}`)) updates.linkedin_slug = keys.linkedin_slug;
+                    if (keys.linkedin_url && !p.linkedin_url && !owned.has(`lurl:${keys.linkedin_url}`)) updates.linkedin_url = keys.linkedin_url;
                 }
-            } catch { /* swallow — caching must not fail the caller */ }
+                try {
+                    await this.updateProfile(p.id, updates);
+                } catch (err: any) {
+                    console.error(`[recordProfile] key-fill collision on ${p.id}, retrying data-only:`, err?.message || err);
+                    await mergeInto(p.id, p.data);
+                }
+            }
+            return { profile_id: primary.id, created: false };
+        } catch (err: any) {
+            // Caching must never fail the caller — log and move on.
+            console.error("[recordProfile] failed to cache profile:", err?.message || err);
             return { profile_id: null, created: false };
         }
     }
