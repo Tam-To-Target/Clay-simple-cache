@@ -51,7 +51,6 @@ export async function withRetry(
   let refreshes = 0;
   let retries = 0;
   let forceToken = false;
-  let lastRes: Response | null = null;
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -63,12 +62,10 @@ export async function withRetry(
     if (res.status === 401 && refreshes < maxRefreshes) {
       refreshes++;
       forceToken = true;
-      lastRes = res;
       continue;
     }
 
     if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
-      lastRes = res;
       if (retries >= opts.maxRetries) return res;
       const retryAfter = Number(res.headers.get("retry-after"));
       const backoff =

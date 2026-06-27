@@ -135,7 +135,14 @@ export async function fetchMemberContacts(
     //  - total_pages absent → stop on the first short/empty page;
     //  - hard safety bound either way.
     if (totalPages !== undefined ? page >= totalPages : list.length < CONTACTS_PAGE_SIZE) break;
-    if (page >= MAX_CONTACT_PAGES) break;
+    if (page >= MAX_CONTACT_PAGES) {
+      // Surface the truncation instead of silently under-scanning a huge book.
+      console.warn(
+        `[phoneburner] member ${memberId}: hit MAX_CONTACT_PAGES (${MAX_CONTACT_PAGES}); ` +
+          `scan truncated at ${out.length} contacts${totalPages ? ` of ${totalPages} pages` : ""}.`
+      );
+      break;
+    }
     page++;
   }
 

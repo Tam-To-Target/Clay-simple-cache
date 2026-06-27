@@ -58,11 +58,13 @@ export const dncController = {
         {
           ...(ids.domain ? { domain: ids.domain } : {}),
           ...(ids.email_domain ? { email_domain: ids.email_domain } : {}),
-          // DISJOINT dnc_* keys (never `source`/`client_id`), so a check can't
-          // overwrite push attribution cached for the same identity.
-          dnc_status: match ? "do_not_contact" : "contactable",
-          dnc_client_id: client_id,
-          dnc_checked_at: new Date().toISOString(),
+          // Namespaced provenance — disjoint from push (`last_push`) and from any
+          // caller-supplied property, so writers never clobber each other.
+          last_dnc_check: {
+            client_id,
+            status: match ? "do_not_contact" : "contactable",
+            at: new Date().toISOString(),
+          },
         }
       );
 

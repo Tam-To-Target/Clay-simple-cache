@@ -162,15 +162,13 @@ export const profileService = {
 
             const primary = matches.find((p) => keys.email && p.email === keys.email) ?? matches[0];
 
-            // Merge the data into every matched row so it is reachable by any key.
-            // The PRIMARY row takes the incoming values (a refresh); SIBLING rows
-            // get a FILL-ONLY merge (keep their own values, only gain missing keys)
-            // so this never clobbers data on a row the caller didn't target.
+            // Merge the data into every matched row so it stays reachable by any
+            // key and a refreshed value propagates to all rows (incoming wins).
+            // Safe because every writer namespaces its provenance (last_push /
+            // last_dnc_check), so cross-writer keys never collide.
             for (const p of matches) {
                 const isPrimary = p.id === primary.id;
-                const mergedData = isPrimary
-                    ? this.mergeData(p.data, data) // incoming wins
-                    : { ...data, ...((p.data as object) ?? {}) }; // existing wins (fill-only)
+                const mergedData = this.mergeData(p.data, data);
                 const updates: any = { data: mergedData };
                 if (isPrimary) {
                     if (keys.email && !p.email && !owned.has(`email:${keys.email}`)) updates.email = keys.email;

@@ -41,19 +41,20 @@ async function main() {
     const keep = new Set(members.map((m) => m.pb_member_id));
 
     for (const m of members) {
-      // Active because the member RECENTLY DIALED for this client (the registry is
-      // built from the call window) — that, not the SDR's global status, is what
-      // makes their book in-scope. A genuinely offboarded SDR drops out of the
-      // window (and is deactivated below); one with API Access off is skipped at
-      // runtime as skipped_no_access, not silently here.
+      // In-scope because the member RECENTLY DIALED for this client (the registry
+      // is built from the call window) — that, not requiring status to be exactly
+      // 'active', is the signal. We still EXCLUDE an explicitly-inactive SDR so a
+      // frozen/offboarded account isn't purged. (API-Access-off members are also
+      // skipped at runtime as skipped_no_access.)
+      const active = m.status !== "inactive";
       await prisma.phoneburnerMember.upsert({
         where: { client_id_pb_member_id: { client_id: client.id, pb_member_id: m.pb_member_id } },
-        update: { pb_username: m.username, active: true },
+        update: { pb_username: m.username, active },
         create: {
           client_id: client.id,
           pb_member_id: m.pb_member_id,
           pb_username: m.username,
-          active: true,
+          active,
         },
       });
       upserted++;
@@ -70,7 +71,8 @@ async function main() {
       }
     }
 
-    console.log(`● ${rc.slug.padEnd(20)} ${members.length} mapped (active)`);
+    const activeCount = members.filter((m) => m.status !== "inactive").length;
+    console.log(`● ${rc.slug.padEnd(20)} ${members.length} mapped (${activeCount} active)`);
   }
 
   console.log(`\nDone: ${upserted} member(s) upserted, ${deactivated} deactivated.`);

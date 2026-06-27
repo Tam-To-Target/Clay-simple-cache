@@ -50,7 +50,8 @@ async function main() {
     `\nPurge ${summary.status.toUpperCase()} (run ${summary.run_id}, ${summary.dry_run ? "dry-run" : "live"}): ` +
       `${t.clients_processed} client(s), ${t.members_processed} member(s) processed, ` +
       `${t.members_skipped} skipped, ${t.contacts_scanned} scanned, ${t.collisions_found} collisions, ` +
-      `${opts.dryRun ? `${t.deleted} would-delete` : `${t.deleted} deleted`}, ${t.failed} failed.`
+      `${opts.dryRun ? `${t.deleted} would-delete` : `${t.deleted} deleted`}, ${t.failed} failed` +
+      `${t.protected_other_client ? `, ${t.protected_other_client} kept (shared-book)` : ""}.`
   );
 
   for (const c of summary.clients) {

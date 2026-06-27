@@ -94,13 +94,7 @@ A high-effort review of this branch surfaced and we fixed:
   from the recent-call mapping (why the member is in the registry), not the SDR's
   global SDR-Launch status — closes a DNC-coverage gap. Genuinely-off SDRs drop
   out of the call window; API-Access-off members are skipped at runtime.
-- **Profile sibling clobber.** `recordProfile` now full-merges only the primary
-  row; sibling rows get a fill-only merge (keep their values, gain missing keys)
-  so a row the caller didn't target is never overwritten.
-- **Provenance shape regression.** Push attribution stays as **flat** keys
-  (`source`/`client_id`/`hubspot_portal_id`/`hubspot_contact_id`/`pushed_at`) —
-  unchanged for downstream consumers; `/dnc-check` writes a **disjoint** flat set
-  (`dnc_status`/`dnc_client_id`/`dnc_checked_at`) so neither clobbers the other.
+- **Provenance + sibling merge** (see round 3 for the final shape).
 - **Retry budget.** `withRetry` 401-refreshes and 429/5xx retries now use
   separate budgets, so token expiries can't exhaust the transient-error retries.
 - **Pagination truncation.** `fetchMemberContacts` paginates authoritatively on
@@ -116,6 +110,32 @@ Documented tradeoffs (kept by design, layered behind dry-run + rollout):
 - **Domain matching is on by default** but only uses domains a client explicitly
   put on a `(Domain)` DNC list (free/disposable-filtered); disable with
   `PB_PURGE_INCLUDE_DOMAINS=false`.
+
+## 6b. Verification re-review fixes (round 3)
+
+A second review of the round-2 fixes caught over-corrections, now resolved:
+
+- **Cross-tenant guard could still collapse.** The serving map is now built from
+  EVERY member row of an active client (not just `active` members), so a stale or
+  deactivated mapping can't shrink a member's serving set and bypass the guard.
+- **Provenance — final shape: namespaced.** Push writes `last_push` and
+  `/dnc-check` writes `last_dnc_check` (nested objects). This is the canonical
+  shape: it can't collide with a caller-supplied property named `source`/`client_id`,
+  nor can the two writers clobber each other. (No real downstream consumer is
+  locked to a flat shape — the system isn't live with real customers yet.)
+- **Sibling merge — final: incoming-wins on all matched rows.** Safe now that
+  provenance is namespaced, so a refreshed value propagates to every row (no
+  stale-by-key divergence) without clobbering another writer's keys.
+- **Retry dead state** removed; **pagination truncation** at the safety bound now
+  logs a warning instead of silently under-scanning.
+- **Member active flag**: `status !== 'inactive'` — in-scope unless explicitly
+  inactive (reconciles "recently dialed" with "don't purge a frozen account").
+- **`protected_other_client`** is now aggregated into run totals + the run row note.
+
+Known limitation (documented, not blocking): a member who dials for multiple
+clients in one run has their book fetched once **per** serving client (idempotent
+deletes make this correct, just not minimal). With one multi-client member today
+the cost is negligible; a future optimization is member-centric iteration.
 
 ## 7. Open items before enabling live PhoneBurner deletes
 

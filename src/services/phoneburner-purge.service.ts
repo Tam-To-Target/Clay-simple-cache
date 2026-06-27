@@ -339,6 +339,8 @@ export interface PurgeRunSummary {
     collisions_found: number;
     deleted: number;
     failed: number;
+    /** Contacts on a client's DNC kept because another client the member serves still wants them. */
+    protected_other_client: number;
   };
   status: "ok" | "partial" | "error";
 }
@@ -363,14 +365,17 @@ export async function runPurge(
     },
   });
 
-  // Cross-client serving map (ALL active clients, not just targets) so the
-  // shared-book guard knows every client a member dials for even under a filter.
-  const allActiveMembers = await prisma.phoneburnerMember.findMany({
-    where: { active: true, client: { active: true } },
+  // Cross-client serving map for the shared-book guard. Built from EVERY member
+  // row of an active client (NOT filtered by member.active) so a stale/deactivated
+  // mapping can't shrink a member's serving set and let the guard collapse to a
+  // single client — which would re-open the cross-tenant deletion it prevents.
+  // (Over-including is safe: it only makes the guard MORE conservative.)
+  const allMemberRows = await prisma.phoneburnerMember.findMany({
+    where: { client: { active: true } },
     select: { pb_member_id: true, client_id: true },
   });
   const servingMap = new Map<string, string[]>();
-  for (const m of allActiveMembers) {
+  for (const m of allMemberRows) {
     const arr = servingMap.get(m.pb_member_id) ?? [];
     if (!arr.includes(m.client_id)) arr.push(m.client_id);
     servingMap.set(m.pb_member_id, arr);
@@ -426,6 +431,7 @@ export async function runPurge(
     collisions_found: allMembers.reduce((n, m) => n + m.collisions, 0),
     deleted: allMembers.reduce((n, m) => n + m.deleted, 0),
     failed: allMembers.reduce((n, m) => n + m.failed, 0),
+    protected_other_client: allMembers.reduce((n, m) => n + (m.protected_other_client ?? 0), 0),
   };
 
   if (allMembers.some((m) => m.status === "error")) hadError = true;
@@ -443,6 +449,9 @@ export async function runPurge(
       deleted: totals.deleted,
       failed: totals.failed,
       status,
+      notes: totals.protected_other_client
+        ? `${totals.protected_other_client} contact(s) kept (shared-book, wanted by another client)`
+        : null,
     },
   });
 
