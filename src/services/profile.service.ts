@@ -163,9 +163,16 @@ export const profileService = {
             const primary = matches.find((p) => keys.email && p.email === keys.email) ?? matches[0];
 
             // Merge the data into every matched row so it is reachable by any key.
+            // The PRIMARY row takes the incoming values (a refresh); SIBLING rows
+            // get a FILL-ONLY merge (keep their own values, only gain missing keys)
+            // so this never clobbers data on a row the caller didn't target.
             for (const p of matches) {
-                const updates: any = { data: this.mergeData(p.data, data) };
-                if (p.id === primary.id) {
+                const isPrimary = p.id === primary.id;
+                const mergedData = isPrimary
+                    ? this.mergeData(p.data, data) // incoming wins
+                    : { ...data, ...((p.data as object) ?? {}) }; // existing wins (fill-only)
+                const updates: any = { data: mergedData };
+                if (isPrimary) {
                     if (keys.email && !p.email && !owned.has(`email:${keys.email}`)) updates.email = keys.email;
                     if (keys.phone_e164 && !p.phone_e164 && !owned.has(`phone:${keys.phone_e164}`)) updates.phone_e164 = keys.phone_e164;
                     if (keys.linkedin_slug && !p.linkedin_slug && !owned.has(`lslug:${keys.linkedin_slug}`)) updates.linkedin_slug = keys.linkedin_slug;
@@ -175,7 +182,7 @@ export const profileService = {
                     await this.updateProfile(p.id, updates);
                 } catch (err: any) {
                     console.error(`[recordProfile] key-fill collision on ${p.id}, retrying data-only:`, err?.message || err);
-                    await mergeInto(p.id, p.data);
+                    await this.updateProfile(p.id, { data: mergedData } as any);
                 }
             }
             return { profile_id: primary.id, created: false };

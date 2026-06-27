@@ -53,6 +53,8 @@ export interface MemberPurgeResult {
   collisions: number;
   deleted: number;
   failed: number;
+  /** Contacts on this client's DNC but kept because another client the member serves still wants them. */
+  protected_other_client?: number;
   error?: string;
 }
 
@@ -138,11 +140,18 @@ interface RunCounters {
   deletedThisRun: number;
 }
 
-/** Purge a single member's PhoneBurner book against a client's DNC sets. */
+/** Purge a single member's PhoneBurner book against a client's DNC sets.
+ *
+ * `guardSets` are the DNC sets of EVERY client this member dials for (including
+ * the current one). A PhoneBurner member has ONE shared book, so a contact is
+ * deleted only when it is suppressed by ALL of those clients — never when it is
+ * still a live lead for another client the same member serves (no cross-tenant
+ * data loss). For the common single-client member, guardSets === [sets]. */
 export async function purgeMember(
   client: Client,
   member: PhoneburnerMember,
   sets: DncSets,
+  guardSets: DncSets[],
   opts: PurgeOptions,
   runId: string | null,
   counters: RunCounters
@@ -184,11 +193,23 @@ export async function purgeMember(
   base.pb_username = base.pb_username ?? getMemberUsername(member.pb_member_id);
 
   const collisions: { contact: PbContact; match: Collision }[] = [];
+  let protectedByOtherClient = 0;
   for (const c of contacts) {
     const match = collide(c, sets, opts.includeDomains);
-    if (match) collisions.push({ contact: c, match });
+    if (!match) continue;
+    // Shared-book safety: only delete when SUPPRESSED BY EVERY client this member
+    // dials for. If another serving client doesn't suppress it, it may be that
+    // client's live lead — leave it.
+    const suppressedByAll =
+      guardSets.length <= 1 || guardSets.every((g) => collide(c, g, opts.includeDomains) !== null);
+    if (!suppressedByAll) {
+      protectedByOtherClient++;
+      continue;
+    }
+    collisions.push({ contact: c, match });
   }
   base.collisions = collisions.length;
+  if (protectedByOtherClient > 0) base.protected_other_client = protectedByOtherClient;
 
   // Safety gate — a collision ratio this high signals a corrupt DNC sync, not a
   // legitimately dirty book. Abort this member's deletes; surface for review.
@@ -259,19 +280,27 @@ async function touchMember(id: string, data: { api_access_ok: boolean }): Promis
   }
 }
 
+/** Shared per-run context: a memoized DNC-set loader + the cross-client serving map. */
+export interface PurgeContext {
+  getSets: (clientId: string) => Promise<DncSets>;
+  /** Every client id a PhoneBurner member dials for (across ALL active clients). */
+  servingClientIds: (pbMemberId: string) => string[];
+}
+
 /** Purge every active member of one client. */
 export async function purgeClient(
   client: Client,
   opts: PurgeOptions,
   runId: string | null,
-  counters: RunCounters
+  counters: RunCounters,
+  ctx: PurgeContext
 ): Promise<ClientPurgeResult> {
   const members = await prisma.phoneburnerMember.findMany({
     where: { client_id: client.id, active: true },
   });
   if (members.length === 0) return { client_external_id: client.external_id, members: [] };
 
-  const sets = await loadDncSets(client.id);
+  const sets = await ctx.getSets(client.id);
   // No DNC entries → nothing to collide; don't waste a full PB scan.
   if (sets.emails.size === 0 && sets.phones.size === 0 && sets.domains.size === 0) {
     return {
@@ -290,7 +319,10 @@ export async function purgeClient(
 
   const results: MemberPurgeResult[] = [];
   for (const member of members) {
-    results.push(await purgeMember(client, member, sets, opts, runId, counters));
+    // All clients this member dials for → only delete contacts suppressed by all.
+    const servingIds = ctx.servingClientIds(member.pb_member_id);
+    const guardSets = await Promise.all((servingIds.length ? servingIds : [client.id]).map(ctx.getSets));
+    results.push(await purgeMember(client, member, sets, guardSets, opts, runId, counters));
   }
   return { client_external_id: client.external_id, members: results };
 }
@@ -331,11 +363,40 @@ export async function runPurge(
     },
   });
 
+  // Cross-client serving map (ALL active clients, not just targets) so the
+  // shared-book guard knows every client a member dials for even under a filter.
+  const allActiveMembers = await prisma.phoneburnerMember.findMany({
+    where: { active: true, client: { active: true } },
+    select: { pb_member_id: true, client_id: true },
+  });
+  const servingMap = new Map<string, string[]>();
+  for (const m of allActiveMembers) {
+    const arr = servingMap.get(m.pb_member_id) ?? [];
+    if (!arr.includes(m.client_id)) arr.push(m.client_id);
+    servingMap.set(m.pb_member_id, arr);
+  }
+  const setsCache = new Map<string, DncSets>();
+  const ctx: PurgeContext = {
+    getSets: async (cid) => {
+      if (!setsCache.has(cid)) setsCache.set(cid, await loadDncSets(cid));
+      return setsCache.get(cid)!;
+    },
+    servingClientIds: (pid) => servingMap.get(pid) ?? [],
+  };
+
+  // Dry-run rows are informational; clear the prior dry-run's rows for the
+  // targeted clients so repeated dry-runs don't accumulate duplicates.
+  if (opts.dryRun && clients.length) {
+    await prisma.phoneburnerDeletion.deleteMany({
+      where: { status: "dry_run", client_id: { in: clients.map((c) => c.id) } },
+    });
+  }
+
   const clientResults: ClientPurgeResult[] = [];
   let hadError = false;
   for (const client of clients) {
     try {
-      clientResults.push(await purgeClient(client, opts, run.id, counters));
+      clientResults.push(await purgeClient(client, opts, run.id, counters, ctx));
     } catch (err: any) {
       hadError = true;
       clientResults.push({

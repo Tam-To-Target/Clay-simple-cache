@@ -133,10 +133,13 @@ describe("purgeOptionsFromEnv", () => {
 
 describe("purgeMember", () => {
   const counters = () => ({ deletedThisRun: 0 });
+  // Single-client member: guardSets is just [sets].
+  const solo = (s: DncSets) => [s];
 
   it("skips when the member has no resolvable token", async () => {
     tokenMock.mockResolvedValue(null);
-    const r = await purgeMember(CLIENT, MEMBER, sets(["a@b.com"], [], []), OPTS, "run1", counters());
+    const s = sets(["a@b.com"], [], []);
+    const r = await purgeMember(CLIENT, MEMBER, s, solo(s), OPTS, "run1", counters());
     expect(r.status).toBe("skipped_no_token");
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -144,7 +147,8 @@ describe("purgeMember", () => {
   it("skips when API access is disabled (403)", async () => {
     tokenMock.mockResolvedValue("tok");
     fetchMock.mockRejectedValue(new PhoneburnerAccessError("pb1", "API access disabled"));
-    const r = await purgeMember(CLIENT, MEMBER, sets(["a@b.com"], [], []), OPTS, "run1", counters());
+    const s = sets(["a@b.com"], [], []);
+    const r = await purgeMember(CLIENT, MEMBER, s, solo(s), OPTS, "run1", counters());
     expect(r.status).toBe("skipped_no_access");
   });
 
@@ -156,7 +160,8 @@ describe("purgeMember", () => {
       contact({ id: "c2", emails: ["safe@x.com"] }),
       contact({ id: "c3", emails: ["safe2@x.com"] }),
     ]);
-    const r = await purgeMember(CLIENT, MEMBER, sets(["a@b.com"], [], []), OPTS, "run1", counters());
+    const s = sets(["a@b.com"], [], []);
+    const r = await purgeMember(CLIENT, MEMBER, s, solo(s), OPTS, "run1", counters());
     expect(r.status).toBe("ok");
     expect(r.contacts_scanned).toBe(3);
     expect(r.collisions).toBe(1);
@@ -169,7 +174,6 @@ describe("purgeMember", () => {
   it("live: backs up then deletes the colliding contact", async () => {
     const liveOpts = { ...OPTS, dryRun: false };
     tokenMock.mockResolvedValue("tok");
-    // 1 collision in 3 contacts → under the gate.
     fetchMock.mockResolvedValue([
       contact({ id: "c1", phones: ["(415) 555-1212"] }),
       contact({ id: "c2", phones: ["+19998887777"] }),
@@ -177,7 +181,8 @@ describe("purgeMember", () => {
     ]);
     deleteMock.mockResolvedValue({ ok: true, status: 204, alreadyGone: false });
     const c = counters();
-    const r = await purgeMember(CLIENT, MEMBER, sets([], ["+14155551212"], []), liveOpts, "run1", c);
+    const s = sets([], ["+14155551212"], []);
+    const r = await purgeMember(CLIENT, MEMBER, s, solo(s), liveOpts, "run1", c);
     expect(r.deleted).toBe(1);
     expect(deleteMock).toHaveBeenCalledWith("c1", expect.any(Function));
     expect(mockPrisma.phoneburnerDeletion.create.mock.calls[0][0].data.status).toBe("pending");
@@ -188,12 +193,12 @@ describe("purgeMember", () => {
   it("aborts a member when collisions exceed the ratio gate", async () => {
     const liveOpts = { ...OPTS, dryRun: false, maxRatio: 0.4 };
     tokenMock.mockResolvedValue("tok");
-    // 2 of 2 contacts collide → ratio 1.0 > 0.4
     fetchMock.mockResolvedValue([
       contact({ id: "c1", emails: ["a@b.com"] }),
       contact({ id: "c2", emails: ["a@b.com"] }),
     ]);
-    const r = await purgeMember(CLIENT, MEMBER, sets(["a@b.com"], [], []), liveOpts, "run1", counters());
+    const s = sets(["a@b.com"], [], []);
+    const r = await purgeMember(CLIENT, MEMBER, s, solo(s), liveOpts, "run1", counters());
     expect(r.status).toBe("aborted_ratio");
     expect(deleteMock).not.toHaveBeenCalled();
     expect(mockPrisma.phoneburnerDeletion.create).not.toHaveBeenCalled();
@@ -202,16 +207,49 @@ describe("purgeMember", () => {
   it("records a failed delete without throwing", async () => {
     const liveOpts = { ...OPTS, dryRun: false };
     tokenMock.mockResolvedValue("tok");
-    // 1 collision in 3 contacts → under the gate.
     fetchMock.mockResolvedValue([
       contact({ id: "c1", emails: ["a@b.com"] }),
       contact({ id: "c2", emails: ["safe@x.com"] }),
       contact({ id: "c3", emails: ["safe2@x.com"] }),
     ]);
     deleteMock.mockResolvedValue({ ok: false, status: 500, alreadyGone: false });
-    const r = await purgeMember(CLIENT, MEMBER, sets(["a@b.com"], [], []), liveOpts, "run1", counters());
+    const s = sets(["a@b.com"], [], []);
+    const r = await purgeMember(CLIENT, MEMBER, s, solo(s), liveOpts, "run1", counters());
     expect(r.deleted).toBe(0);
     expect(r.failed).toBe(1);
     expect(mockPrisma.phoneburnerDeletion.update.mock.calls[0][0].data.status).toBe("failed");
+  });
+
+  it("multi-client shared book: does NOT delete a contact another client still wants", async () => {
+    const liveOpts = { ...OPTS, dryRun: false };
+    tokenMock.mockResolvedValue("tok");
+    // c1 is on client A's DNC but NOT on client B's; member dials for both.
+    fetchMock.mockResolvedValue([
+      contact({ id: "c1", emails: ["dnc-for-a@b.com"] }),
+      contact({ id: "c2", emails: ["safe@x.com"] }),
+      contact({ id: "c3", emails: ["safe2@x.com"] }),
+    ]);
+    const clientA = sets(["dnc-for-a@b.com"], [], []);
+    const clientB = sets(["someone-else@b.com"], [], []); // does not suppress c1
+    const r = await purgeMember(CLIENT, MEMBER, clientA, [clientA, clientB], liveOpts, "run1", counters());
+    expect(r.collisions).toBe(0);
+    expect(r.protected_other_client).toBe(1);
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+
+  it("multi-client shared book: DELETES a contact suppressed by all serving clients", async () => {
+    const liveOpts = { ...OPTS, dryRun: false };
+    tokenMock.mockResolvedValue("tok");
+    fetchMock.mockResolvedValue([
+      contact({ id: "c1", emails: ["dnc-everywhere@b.com"] }),
+      contact({ id: "c2", emails: ["safe@x.com"] }),
+      contact({ id: "c3", emails: ["safe2@x.com"] }),
+    ]);
+    deleteMock.mockResolvedValue({ ok: true, status: 204, alreadyGone: false });
+    const clientA = sets(["dnc-everywhere@b.com"], [], []);
+    const clientB = sets(["dnc-everywhere@b.com"], [], []); // both suppress c1
+    const r = await purgeMember(CLIENT, MEMBER, clientA, [clientA, clientB], liveOpts, "run1", counters());
+    expect(r.collisions).toBe(1);
+    expect(r.deleted).toBe(1);
   });
 });

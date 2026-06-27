@@ -81,7 +81,43 @@ New: `JSON_BODY_LIMIT`, `PB_MAP_CALL_WINDOW_DAYS`, `PHONEBURNER_ADMIN_TOKEN`,
 `PHONEBURNER_API_BASE`, `PHONEBURNER_USER_AGENT`, `PB_PURGE_DRY_RUN` (default true),
 `PB_PURGE_MAX_RATIO`, `PB_PURGE_INCLUDE_DOMAINS`, `PB_PURGE_MAX_DELETES_PER_RUN`.
 
-## 6. Open items before enabling live PhoneBurner deletes
+## 6. Branch code-review fixes (round 2)
+
+A high-effort review of this branch surfaced and we fixed:
+
+- **Cross-tenant deletion (shared PhoneBurner book).** A member who dials for
+  multiple clients has ONE book; the purge now deletes a contact only when it is
+  suppressed by **every** client that member serves (`guardSets` in `purgeMember`,
+  built from a cross-client serving map in `runPurge`). A contact on client A's
+  DNC that is still a live lead for client B is kept (`protected_other_client`).
+- **Member `active` from the wrong source.** `pb:bootstrap` now sets `active`
+  from the recent-call mapping (why the member is in the registry), not the SDR's
+  global SDR-Launch status — closes a DNC-coverage gap. Genuinely-off SDRs drop
+  out of the call window; API-Access-off members are skipped at runtime.
+- **Profile sibling clobber.** `recordProfile` now full-merges only the primary
+  row; sibling rows get a fill-only merge (keep their values, gain missing keys)
+  so a row the caller didn't target is never overwritten.
+- **Provenance shape regression.** Push attribution stays as **flat** keys
+  (`source`/`client_id`/`hubspot_portal_id`/`hubspot_contact_id`/`pushed_at`) —
+  unchanged for downstream consumers; `/dnc-check` writes a **disjoint** flat set
+  (`dnc_status`/`dnc_client_id`/`dnc_checked_at`) so neither clobbers the other.
+- **Retry budget.** `withRetry` 401-refreshes and 429/5xx retries now use
+  separate budgets, so token expiries can't exhaust the transient-error retries.
+- **Pagination truncation.** `fetchMemberContacts` paginates authoritatively on
+  `total_pages` (an empty middle page no longer truncates the scan), falls back
+  to short-page detection, and has a hard page bound.
+- **Dry-run audit dedup.** Repeated dry-runs clear the prior dry-run's audit rows
+  for the targeted clients instead of accumulating duplicates.
+
+Documented tradeoffs (kept by design, layered behind dry-run + rollout):
+- The **40% ratio gate** blocks a *mass* mis-delete but not a sub-threshold one;
+  the layered defense is dry-run-by-default → review `phoneburner_deletions` →
+  enable per client, plus the optional `PB_PURGE_MAX_DELETES_PER_RUN` breaker.
+- **Domain matching is on by default** but only uses domains a client explicitly
+  put on a `(Domain)` DNC list (free/disposable-filtered); disable with
+  `PB_PURGE_INCLUDE_DOMAINS=false`.
+
+## 7. Open items before enabling live PhoneBurner deletes
 
 1. **`PHONEBURNER_ADMIN_TOKEN` lifecycle** (`PHONEBURNER_DNC_PURGE_PLAN.md` §7/§11):
    long-lived admin token vs. an OAuth-refresh helper. Blocker for go-live.

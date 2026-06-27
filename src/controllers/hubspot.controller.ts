@@ -124,14 +124,13 @@ export const hubspotController = {
         {
           ...properties,
           ...(phone?.national ? { phone_national: phone.national } : {}),
-          // Namespaced provenance so a later /dnc-check on the same identity
-          // can't clobber push attribution (each writer owns a distinct key).
-          last_push: {
-            client_id,
-            hubspot_portal_id: client.hubspot_portal_id,
-            hubspot_contact_id: result.id,
-            at: new Date().toISOString(),
-          },
+          // Flat push-attribution keys. /dnc-check writes a DISJOINT set of keys
+          // (dnc_*), so a later check can't clobber these.
+          source: "hubspot_push",
+          client_id,
+          hubspot_portal_id: client.hubspot_portal_id,
+          hubspot_contact_id: result.id,
+          pushed_at: new Date().toISOString(),
         }
       );
 

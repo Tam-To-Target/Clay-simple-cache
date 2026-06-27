@@ -15,6 +15,9 @@ import { phoneburnerApiBase } from "./phoneburner-token.service";
 const USER_AGENT = process.env.PHONEBURNER_USER_AGENT || "TAM-DNC-Cache/1.0";
 const CONTACTS_PAGE_SIZE = 300;
 const MAX_RETRIES = 5;
+// Safety bound on a single member's book scan (300k contacts) — guards against a
+// pathological/looping pagination response.
+const MAX_CONTACT_PAGES = 1000;
 const throttle = createThrottle(150); // ~6-7 req/s per process, well under PB limits
 
 /** Raised when a member's PhoneBurner account does not have API Access enabled. */
@@ -98,6 +101,7 @@ export async function fetchMemberContacts(
 ): Promise<PbContact[]> {
   const out: PbContact[] = [];
   let page = 1;
+  let totalPages: number | undefined;
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -122,8 +126,16 @@ export async function fetchMemberContacts(
     }
     if (onProgress) onProgress(out.length);
 
-    const totalPages = Number(env?.total_pages ?? env?.totalPages ?? 1);
-    if (!Number.isFinite(totalPages) || page >= totalPages || list.length === 0) break;
+    const tp = Number(env?.total_pages ?? env?.totalPages);
+    if (Number.isFinite(tp) && tp > 0) totalPages = tp;
+
+    // Pagination stop:
+    //  - total_pages known → loop exactly that many pages (an empty/odd MIDDLE
+    //    page no longer truncates the scan);
+    //  - total_pages absent → stop on the first short/empty page;
+    //  - hard safety bound either way.
+    if (totalPages !== undefined ? page >= totalPages : list.length < CONTACTS_PAGE_SIZE) break;
+    if (page >= MAX_CONTACT_PAGES) break;
     page++;
   }
 

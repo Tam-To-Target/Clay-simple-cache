@@ -45,11 +45,16 @@ export async function withRetry(
   opts: RetryOptions
 ): Promise<Response> {
   const maxRefreshes = opts.maxTokenRefreshes ?? 3;
+  // 401 refreshes and 429/5xx retries have SEPARATE budgets, so a couple of
+  // mid-run token expiries can't consume the transient-error retry budget (and
+  // vice-versa) and cause a recoverable request to return a failing Response.
   let refreshes = 0;
+  let retries = 0;
   let forceToken = false;
   let lastRes: Response | null = null;
 
-  for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
     await opts.throttle();
     const token = await getToken(forceToken);
     forceToken = false;
@@ -64,18 +69,17 @@ export async function withRetry(
 
     if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
       lastRes = res;
-      if (attempt === opts.maxRetries) return res;
+      if (retries >= opts.maxRetries) return res;
       const retryAfter = Number(res.headers.get("retry-after"));
       const backoff =
         Number.isFinite(retryAfter) && retryAfter > 0
           ? retryAfter * 1000
-          : Math.min(1000 * 2 ** attempt, 16_000);
+          : Math.min(1000 * 2 ** retries, 16_000);
+      retries++;
       await sleep(backoff);
       continue;
     }
 
     return res;
   }
-
-  return lastRes as Response;
 }
