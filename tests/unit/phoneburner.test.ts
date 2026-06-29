@@ -5,6 +5,36 @@ import {
   deletePbContact,
   PhoneburnerAccessError,
 } from "../../src/services/phoneburner.service";
+import { flattenPbCollection } from "../../src/services/phoneburner-token.service";
+
+const isContact = (o: any) =>
+  o.user_id !== undefined || o.primary_email !== undefined || o.phones !== undefined;
+
+describe("flattenPbCollection", () => {
+  it("flattens an array of index-keyed maps (PhoneBurner's real shape)", () => {
+    // members.members = [ { "0": rec, "1": rec } ]
+    const raw = [{ "0": { user_id: 1 }, "1": { user_id: 2 } }];
+    expect(flattenPbCollection(raw, isContact).map((r) => r.user_id)).toEqual([1, 2]);
+  });
+
+  it("handles a flat array of records", () => {
+    const raw = [{ user_id: 1 }, { user_id: 2 }];
+    expect(flattenPbCollection(raw, isContact)).toHaveLength(2);
+  });
+
+  it("handles a single index-keyed map object", () => {
+    const raw = { "0": { user_id: 9 }, "1": { user_id: 10 } };
+    expect(flattenPbCollection(raw, isContact).map((r) => r.user_id)).toEqual([9, 10]);
+  });
+
+  it("does not recurse into a record's own nested objects", () => {
+    // A member record with a nested oauth object must be returned whole, once.
+    const raw = [{ "0": { user_id: 1, oauth: { bearer_token: "x" } } }];
+    const out = flattenPbCollection(raw, (o) => o.user_id !== undefined || o.oauth !== undefined);
+    expect(out).toHaveLength(1);
+    expect(out[0].oauth.bearer_token).toBe("x");
+  });
+});
 
 const getToken = async () => "member-token";
 
@@ -64,6 +94,24 @@ describe("fetchMemberContacts", () => {
     const out = await fetchMemberContacts("m1", getToken);
     expect(out.map((c) => c.id)).toEqual(["1", "2"]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("parses PhoneBurner's nested index-map contacts shape", async () => {
+    // Real shape: { contacts: { total_pages, page, contacts: [ { "0": rec, "1": rec } ] } }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonRes(200, {
+          contacts: {
+            total_pages: 1,
+            page: 1,
+            contacts: [{ "0": { user_id: 11, primary_email: "a@x.com" }, "1": { user_id: 12, primary_email: "b@x.com" } }],
+          },
+        })
+      )
+    );
+    const out = await fetchMemberContacts("m1", getToken);
+    expect(out.map((c) => c.id).sort()).toEqual(["11", "12"]);
   });
 
   it("throws PhoneburnerAccessError on 403 (API access off)", async () => {

@@ -10,7 +10,7 @@
  */
 
 import { createThrottle, withRetry } from "./http-retry";
-import { phoneburnerApiBase } from "./phoneburner-token.service";
+import { phoneburnerApiBase, flattenPbCollection } from "./phoneburner-token.service";
 
 const USER_AGENT = process.env.PHONEBURNER_USER_AGENT || "TAM-DNC-Cache/1.0";
 const CONTACTS_PAGE_SIZE = 300;
@@ -119,7 +119,17 @@ export async function fetchMemberContacts(
 
     const json: any = await res.json();
     const env = json?.contacts ?? json;
-    const list: any[] = env?.contacts ?? env?.data ?? (Array.isArray(env) ? env : []);
+    // PhoneBurner nests collections as an array of index-keyed maps (see
+    // flattenPbCollection) — a contact leaf has user_id / a primary_email / phones.
+    const list = flattenPbCollection(
+      env?.contacts ?? env?.data ?? env,
+      (o) =>
+        o.user_id !== undefined ||
+        o.primary_email !== undefined ||
+        o.emails !== undefined ||
+        o.primary_phone !== undefined ||
+        o.phones !== undefined
+    );
     for (const rec of list) {
       const c = normalizePbContact(rec);
       if (c.id) out.push(c);
