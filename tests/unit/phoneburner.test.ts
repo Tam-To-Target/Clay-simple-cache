@@ -75,6 +75,18 @@ describe("normalizePbContact", () => {
     expect(c.emails).toEqual([]);
     expect(c.phones).toEqual([]);
   });
+
+  it("extracts primary_email/primary_phone when they are OBJECTS (real PB shape)", () => {
+    const c = normalizePbContact({
+      user_id: 7,
+      primary_email: { email_address: "p@corp.com", status: "1" },
+      primary_phone: { phone: "+1 401-525-8067", raw_phone: "4015258067", do_not_call: 0 },
+    });
+    expect(c.emails).toContain("p@corp.com");
+    expect(c.emails).not.toContain("[object Object]");
+    expect(c.phones).toContain("4015258067");
+    expect(c.phones).not.toContain("[object Object]");
+  });
 });
 
 describe("fetchMemberContacts", () => {

@@ -64,19 +64,28 @@ async function pbFetch(
   );
 }
 
+/** PhoneBurner email/phone fields come as either a bare string or an object
+ * ({email_address} / {raw_phone,phone}); pull the value out of either form. */
+function emailOf(e: any): string | null {
+  if (!e) return null;
+  return typeof e === "string" ? e : e.email_address ?? e.email ?? null;
+}
+function phoneOf(p: any): string | null {
+  if (!p) return null;
+  return typeof p === "string" ? p : p.raw_phone ?? p.phone_number ?? p.phone ?? null;
+}
+
 /** Normalize one PhoneBurner contact record into the fields we collide on. */
 export function normalizePbContact(rec: any): PbContact {
   const emails = new Set<string>();
-  if (rec?.primary_email) emails.add(String(rec.primary_email));
-  for (const e of rec?.emails ?? []) {
-    const v = typeof e === "string" ? e : e?.email_address ?? e?.email;
+  for (const e of [rec?.primary_email, ...(rec?.emails ?? [])]) {
+    const v = emailOf(e);
     if (v) emails.add(String(v));
   }
 
   const phones = new Set<string>();
-  if (rec?.primary_phone) phones.add(String(rec.primary_phone));
-  for (const p of rec?.phones ?? []) {
-    const v = typeof p === "string" ? p : p?.raw_phone ?? p?.phone_number ?? p?.phone;
+  for (const p of [rec?.primary_phone, ...(rec?.phones ?? [])]) {
+    const v = phoneOf(p);
     if (v) phones.add(String(v));
   }
 
