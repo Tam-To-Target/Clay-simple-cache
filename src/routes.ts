@@ -4,6 +4,7 @@ import { companiesController } from './controllers/companies.controller';
 import { linkedinFinderController } from './controllers/linkedin-finder.controller';
 import { dncController } from './controllers/dnc.controller';
 import { hubspotController } from './controllers/hubspot.controller';
+import { phoneburnerController } from './controllers/phoneburner.controller';
 
 import { docsController } from './controllers/docs.controller';
 import { authMiddleware } from './middleware/auth.middleware';
@@ -34,6 +35,9 @@ router.post('/admin/dnc/discover', authMiddleware, dncController.discover);
 
 // HubSpot contact push (create/update in the client's portal)
 router.post('/admin/hubspot/contacts', authMiddleware, hubspotController.createContact);
+
+// PhoneBurner DNC purge (delete DNC-colliding contacts from members' books)
+router.post('/admin/phoneburner/purge', authMiddleware, phoneburnerController.purge);
 
 router.get('/docs/api', docsController.get);
 

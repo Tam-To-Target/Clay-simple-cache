@@ -69,4 +69,18 @@ describe("authMiddleware", () => {
     expect(res.statusCode).toBe(500);
     expect(next).not.toHaveBeenCalled();
   });
+
+  // Constant-time comparison must still reject length-mismatched tokens.
+  it("rejects a token that is a prefix of the key", () => {
+    const { req, res, next } = mockReqResNext("Bearer test-secret");
+    authMiddleware(req, res, next);
+    expect(res.statusCode).toBe(401);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty bearer token", () => {
+    const { req, res, next } = mockReqResNext("Bearer ");
+    authMiddleware(req, res, next);
+    expect(res.statusCode).toBe(401);
+  });
 });

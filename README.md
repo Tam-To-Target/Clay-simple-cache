@@ -89,6 +89,9 @@ See full documentation at `GET /docs/api` or visit `http://localhost:3000/docs/a
 - **HubSpot Contact Push**
   - `POST /admin/hubspot/contacts`: Create/update a contact in the client's portal (required: `email`, `campaign_name`, `campaign_type`, `lead_origin`, `lead_origin_details`; optional `check_dnc` to skip suppressed contacts).
 
+- **PhoneBurner DNC purge**
+  - `POST /admin/phoneburner/purge`: Delete DNC-colliding contacts from each client's PhoneBurner members' books (by email/phone/domain). Dry-run by default; full backup before delete; ratio safety gate. See `PHONEBURNER_DNC_PURGE_PLAN.md`. Optional `client_id`, `dry_run`.
+
 ### Example: DNC Check
 
 ```bash
@@ -136,6 +139,26 @@ curl -X POST http://localhost:3000/admin/dnc/sync \
 Example Railway cron (daily at 03:00 UTC): schedule the command `npm run dnc:sync`.
 
 > Sync is intentionally **not** an in-process timer, so it runs once regardless of how many app instances are deployed. HubSpot credentials live per-client in the DB, so no app-wide HubSpot env var is needed.
+
+### Daily PhoneBurner DNC purge (cron)
+
+Runs **after** `dnc:sync` (needs a fresh DNC cache). Deletes DNC-colliding
+contacts from each client's PhoneBurner members' books. **Dry-run by default** —
+set `PB_PURGE_DRY_RUN=false` (or pass `--execute`) only after validating dry-run
+output. See `PHONEBURNER_DNC_PURGE_PLAN.md`.
+
+```bash
+# one-time: map clients -> PhoneBurner members (after clients:generate)
+npm run pb:bootstrap
+
+# daily, sequential after the DNC sync:
+npm run dnc:sync && npm run pb:purge          # dry-run unless PB_PURGE_DRY_RUN=false
+npm run pb:purge -- cust_123 --dry-run        # one client, force dry-run
+```
+
+Needs `PHONEBURNER_ADMIN_TOKEN` (resolves every member token at runtime; tokens
+are never stored). Each member must have PhoneBurner "API Access" enabled, else
+it's skipped. Every deletion is snapshotted to `phoneburner_deletions` first.
 
 ## Testing Normalization
 Run the verification scripts:

@@ -124,11 +124,15 @@ export const hubspotController = {
         {
           ...properties,
           ...(phone?.national ? { phone_national: phone.national } : {}),
-          source: "hubspot_push",
-          client_id,
-          hubspot_portal_id: client.hubspot_portal_id,
-          hubspot_contact_id: result.id,
-          pushed_at: new Date().toISOString(),
+          // Provenance lives under a reserved namespace so it can never collide
+          // with a caller-supplied property (e.g. a contact field named `source`)
+          // nor with the /dnc-check writer (which owns `last_dnc_check`).
+          last_push: {
+            client_id,
+            hubspot_portal_id: client.hubspot_portal_id,
+            hubspot_contact_id: result.id,
+            at: new Date().toISOString(),
+          },
         }
       );
 

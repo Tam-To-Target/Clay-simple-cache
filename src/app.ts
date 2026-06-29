@@ -5,7 +5,9 @@ import router from './routes';
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+// Bounded body size: generous enough for CSV DNC imports, capped to blunt
+// memory-exhaustion via oversized payloads.
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '10mb' }));
 
 app.use(router);
 

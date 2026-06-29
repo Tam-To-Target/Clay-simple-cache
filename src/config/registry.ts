@@ -9,12 +9,22 @@
 import fs from "fs";
 import path from "path";
 
+export interface RegistryPbMember {
+  pb_member_id: string;
+  name: string | null;
+  username: string | null;
+  /** SDR status in SDR Launch ('active' etc.) — drives the member's active flag. */
+  status: string | null;
+}
+
 export interface RegistryClient {
   slug: string;
   portal_id: string;
   name: string;
   client_reference_name: string | null;
   domain: string | null;
+  /** PhoneBurner members that dial for this client (for the DNC purge). */
+  phoneburner_members?: RegistryPbMember[];
 }
 
 export interface ClientRegistry {

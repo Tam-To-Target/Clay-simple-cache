@@ -13,6 +13,8 @@
     "clients:generate": "ts-node src/scripts/generate-clients.ts",
     "dnc:bootstrap": "ts-node src/scripts/bootstrap-dnc.ts",
     "dnc:sync": "ts-node src/scripts/sync-dnc.ts",
+    "pb:bootstrap": "ts-node src/scripts/bootstrap-phoneburner.ts",
+    "pb:purge": "ts-node src/scripts/purge-phoneburner.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

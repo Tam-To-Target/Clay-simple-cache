@@ -58,10 +58,13 @@ export const dncController = {
         {
           ...(ids.domain ? { domain: ids.domain } : {}),
           ...(ids.email_domain ? { email_domain: ids.email_domain } : {}),
-          source: "dnc_check",
-          client_id,
-          last_dnc_status: match ? "do_not_contact" : "contactable",
-          checked_at: new Date().toISOString(),
+          // Namespaced provenance — disjoint from push (`last_push`) and from any
+          // caller-supplied property, so writers never clobber each other.
+          last_dnc_check: {
+            client_id,
+            status: match ? "do_not_contact" : "contactable",
+            at: new Date().toISOString(),
+          },
         }
       );
 

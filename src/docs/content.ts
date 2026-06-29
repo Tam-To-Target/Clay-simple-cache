@@ -415,4 +415,56 @@ immediately retrievable via \`GET /profiles\`. The cached profile id is returned
 **Errors**: \`400\` (missing required field, invalid \`campaign_type\`, or client has no portal),
 \`404\` (unknown client, with \`suggestions\`), \`422\` (HubSpot rejected a property — e.g. an
 unknown internal name), \`502\` (upstream HubSpot failure).
+
+---
+
+### 14. PhoneBurner DNC purge
+**POST** \`/admin/phoneburner/purge\`
+
+Deletes, from each client's PhoneBurner members' dialing books, every contact
+that collides with that client's cached DNC list (by **email**, **phone**, or
+**domain**). SDRs dial out of PhoneBurner, which doesn't read our DNC list, so
+this closes that gap. Normally run daily by cron **after** \`dnc:sync\`; this
+endpoint triggers it on demand. See \`PHONEBURNER_DNC_PURGE_PLAN.md\`.
+
+**Safety rails**: dry-run by default (\`PB_PURGE_DRY_RUN\`, only real deletes when
+explicitly \`false\` or \`dry_run:false\`); every deletion is backed up
+(re-importable snapshot) to \`phoneburner_deletions\` before removal; a member is
+aborted if collisions exceed \`PB_PURGE_MAX_RATIO\` of its book; an optional
+\`PB_PURGE_MAX_DELETES_PER_RUN\` circuit breaker; deletes are idempotent.
+
+**Request Body (JSON)**:
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`client_id\` | String | No | Limit to one client's \`external_id\` (slug). Omit for all eligible clients. |
+| \`dry_run\` | Boolean | No | Override the default. \`true\` = compute + audit only; \`false\` = delete. |
+
+**Response (JSON)**:
+\`\`\`json
+{
+  "status": "ok",
+  "run": {
+    "run_id": "uuid",
+    "dry_run": true,
+    "status": "ok",
+    "totals": {
+      "clients_processed": 1, "members_processed": 2, "members_skipped": 0,
+      "contacts_scanned": 1240, "collisions_found": 37, "deleted": 37, "failed": 0
+    },
+    "clients": [
+      { "client_external_id": "cust", "members": [
+        { "pb_member_id": "1270387091", "status": "ok", "contacts_scanned": 800, "collisions": 20, "deleted": 20, "failed": 0 }
+      ] }
+    ]
+  }
+}
+\`\`\`
+Member \`status\` is one of \`ok\`, \`skipped_no_token\`, \`skipped_no_access\` (API
+Access off), \`skipped_no_dnc\`, \`aborted_ratio\`, \`capped\`, \`error\`. In dry-run,
+\`deleted\` is the would-delete count.
+
+**Errors**: \`400\` (\`PHONEBURNER_ADMIN_TOKEN\` not configured), \`404\` (unknown
+client, with \`suggestions\`), \`500\` (unexpected failure). Per-member problems
+(no token / API access off / ratio gate) never fail the request — they're
+reported per member.
 `;
