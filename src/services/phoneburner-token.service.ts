@@ -40,6 +40,27 @@ interface MemberToken {
   username: string | null;
 }
 
+/**
+ * PhoneBurner list endpoints don't return a flat array — the collection is
+ * commonly `{...: { <items>: [ { "0": rec, "1": rec, ... } ] } }`, i.e. an array
+ * whose elements are index-keyed maps of the real records. This flattens any of:
+ * a flat array, an index-keyed map, or an array of index-keyed maps, into the
+ * leaf records (identified by `isRecord`). Containers are recursed one level.
+ */
+export function flattenPbCollection(raw: any, isRecord: (o: any) => boolean): any[] {
+  const out: any[] = [];
+  const visit = (v: any, depth: number): void => {
+    if (!v || typeof v !== "object" || depth > 4) return;
+    if (isRecord(v)) {
+      out.push(v);
+      return;
+    }
+    for (const child of Array.isArray(v) ? v : Object.values(v)) visit(child, depth + 1);
+  };
+  visit(raw, 0);
+  return out;
+}
+
 // memberId -> token. Populated by a full /members pull, cached for the process.
 const cache = new Map<string, MemberToken>();
 let lastFullPullAtMs = 0;
@@ -95,15 +116,18 @@ export async function refreshMemberTokens(): Promise<Map<string, MemberToken>> {
 
     const json: any = await res.json();
     const env = json?.members ?? json;
-    const list: any[] = env?.members ?? env?.data ?? (Array.isArray(env) ? env : []);
+    const list = flattenPbCollection(
+      env?.members ?? env?.data ?? env,
+      (o) => o.user_id !== undefined || o.member_user_id !== undefined || o.oauth !== undefined
+    );
     for (const m of list) {
-      const id = String(m?.user_id ?? m?.id ?? "");
+      const id = String(m?.user_id ?? m?.member_user_id ?? m?.id ?? "");
       const bearer = m?.oauth?.bearer_token ?? m?.bearer_token ?? null;
       if (!id || !bearer) continue;
       cache.set(id, {
         token: bearer,
         expiresAtMs: parseExpiry(m?.oauth?.expires ?? m?.expires, now),
-        username: m?.email ?? m?.username ?? null,
+        username: m?.username ?? m?.email_address ?? m?.email ?? null,
       });
     }
 
