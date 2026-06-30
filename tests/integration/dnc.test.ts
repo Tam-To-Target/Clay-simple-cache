@@ -145,14 +145,13 @@ describe("DNC API", () => {
   });
 
   describe("POST /admin/clients", () => {
-    it("upserts a client and never returns the hubspot token", async () => {
+    it("upserts a client; hubspot_connected reflects a mapped portal, no token stored", async () => {
       mockPrisma.client.upsert.mockResolvedValue({
         id: "client-uuid",
         external_id: "cust_1",
         name: "Cust",
         active: true,
         hubspot_portal_id: "111",
-        hubspot_access_token: "secret-token",
         created_at: new Date(),
         updated_at: new Date(),
       });
@@ -160,11 +159,12 @@ describe("DNC API", () => {
       const res = await auth(request(app).post("/admin/clients")).send({
         external_id: "cust_1",
         name: "Cust",
-        hubspot_access_token: "secret-token",
+        hubspot_portal_id: "111",
       });
       expect(res.status).toBe(200);
       expect(res.body.client.external_id).toBe("cust_1");
       expect(res.body.client.hubspot_connected).toBe(true);
+      // Tokens are never stored — column removed; resolved via the provisioner.
       expect(res.body.client.hubspot_access_token).toBeUndefined();
     });
 

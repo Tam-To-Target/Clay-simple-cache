@@ -4,11 +4,10 @@ import { dncService, normalizeCheckIdentifiers } from "../services/dnc.service";
 import { profileService } from "../services/profile.service";
 import { normalizeEmail, normalizePhone, normalizeLinkedIn } from "../services/normalization";
 import {
-  upsertHubspotContact,
   normalizeCampaignType,
   CAMPAIGN_TYPE_OPTIONS,
-  HubspotApiError,
 } from "../services/hubspot-contacts.service";
+import { getCrmAdapter } from "../crm/registry";
 
 // Fields the contact MUST carry (HubSpot internal property names). `email` is the
 // identity; the rest are TAM's standard outbound attribution properties.
@@ -108,7 +107,27 @@ export const hubspotController = {
         }
       }
 
-      const result = await upsertHubspotContact(client.hubspot_portal_id, properties);
+      // Egress goes through the shared CRM adapter (Phase 4) — HubSpot today,
+      // pluggable for other CRMs. Properties are passed verbatim.
+      const adapter = getCrmAdapter("hubspot");
+      if (!adapter) {
+        res.status(500).json({ error: "No CRM adapter available for hubspot" });
+        return;
+      }
+      const push = await adapter.upsertContact(
+        { properties },
+        { accountId: client.hubspot_portal_id }
+      );
+      if (!push.ok) {
+        // 4xx from HubSpot (e.g. a bad property) → client error; else upstream.
+        if (!push.retryable && push.code && push.code >= 400 && push.code < 500) {
+          res.status(422).json({ error: push.error });
+          return;
+        }
+        res.status(502).json({ error: push.error });
+        return;
+      }
+      const result = { created: push.action === "created", id: push.externalId };
 
       // Cache the pushed lead as a profile so GET /profiles can return it later
       // (best-effort — recordProfile never throws, so it can't fail the push).
@@ -147,11 +166,8 @@ export const hubspotController = {
         cached_profile_id: cached.profile_id,
       });
     } catch (error: any) {
-      // Surface HubSpot 4xx (e.g. a bad property name) as a client error.
-      if (error instanceof HubspotApiError && error.status >= 400 && error.status < 500) {
-        res.status(422).json({ error: error.message });
-        return;
-      }
+      // HubSpot 4xx/5xx are handled inline via the adapter result above; this
+      // catches everything else (DNC lookup, profile cache, unexpected errors).
       res.status(502).json({ error: error?.message || "Internal server error" });
     }
   },

@@ -17,6 +17,8 @@ model Profile {
   created_at    DateTime @default(now()) @db.Timestamptz(6)
   updated_at    DateTime @updatedAt @db.Timestamptz(6)
 
+  client_links  ContactClient[]
+
   @@index([email])
   @@index([linkedin_slug])
   @@index([linkedin_url])
@@ -78,9 +80,15 @@ model Client {
   external_id          String   @unique
   name                 String
   active               Boolean  @default(true)
-  // HubSpot private-app token used to read the client's lists.
-  // NOTE: stored as provided — protect DB access accordingly.
+  // HubSpot portal id. Tokens are NEVER stored — they are resolved fresh from
+  // the provisioner (see hubspot-token.service). Identity (slug/name/portal) is
+  // sourced from GTMOS via the internal API (see sdr-launch.service), not held
+  // authoritatively here.
   hubspot_portal_id    String?
+  // DEPRECATED: never written or returned (stripped in publicClient). Retained as
+  // a column only so the deploy-time `prisma db push` stays non-destructive (the
+  // start script has no --accept-data-loss). Drop in a deliberate follow-up:
+  //   ALTER TABLE clients DROP COLUMN hubspot_access_token;  (then remove here)
   hubspot_access_token String?
   created_at           DateTime @default(now()) @db.Timestamptz(6)
   updated_at           DateTime @updatedAt @db.Timestamptz(6)
@@ -88,9 +96,37 @@ model Client {
   dnc_sources         DncSource[]
   dnc_entries         DncEntry[]
   phoneburner_members PhoneburnerMember[]
+  contact_links       ContactClient[]
 
   @@index([external_id])
   @@map("clients")
+}
+
+// ─── Contact ↔ Customer association (Phase 3) ───────────────────────────────
+// The bridge that makes the global, deduplicated contact database multi-tenant:
+// one canonical Profile can belong to many customers. This is what lets us build
+// a per-customer TAM list, attribute enrichment to the customers that paid for
+// it, and measure cross-customer reuse (a contact linked to ≥2 clients = an
+// enrichment credit we didn't spend twice).
+model ContactClient {
+  id              String   @id @default(uuid()) @db.Uuid
+  contact_id      String   @db.Uuid
+  contact         Profile  @relation(fields: [contact_id], references: [id], onDelete: Cascade)
+  client_id       String   @db.Uuid
+  client          Client   @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  // How this contact entered the customer's universe: 'enriched' (we paid to
+  // enrich it for them), 'pushed' (we pushed it to their CRM), 'imported', 'manual'.
+  source          String   @default("manual")
+  // Cheapest provenance for the credit-savings story: was enrichment data
+  // already cached when this customer asked for it?
+  reused_cache    Boolean  @default(false)
+  first_seen_at   DateTime @default(now()) @db.Timestamptz(6)
+  last_enriched_at DateTime? @db.Timestamptz(6)
+
+  @@unique([contact_id, client_id])
+  @@index([client_id])
+  @@index([contact_id])
+  @@map("contact_clients")
 }
 
 // Where a client's DNC entries come from: an uploaded CSV or a HubSpot list.

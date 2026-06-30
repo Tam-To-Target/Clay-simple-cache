@@ -18,15 +18,16 @@ export interface UpsertClientParams {
   name?: string;
   active?: boolean;
   hubspot_portal_id?: string | null;
-  hubspot_access_token?: string | null;
 }
 
-/** Strip the HubSpot token before returning a client over the API. */
+/** Public view of a client. Strips the deprecated token column and reports
+ *  `hubspot_connected` from the mapped portal (tokens are resolved on demand via
+ *  the provisioner, never stored). */
 export function publicClient(client: Client) {
-  const { hubspot_access_token, ...rest } = client;
+  const { hubspot_access_token: _deprecated, ...rest } = client;
   return {
     ...rest,
-    hubspot_connected: !!hubspot_access_token,
+    hubspot_connected: !!client.hubspot_portal_id,
   };
 }
 
@@ -37,7 +38,7 @@ export const clientService = {
 
   /** Create or update a client keyed by external_id. */
   async upsert(params: UpsertClientParams): Promise<Client> {
-    const { external_id, name, active, hubspot_portal_id, hubspot_access_token } = params;
+    const { external_id, name, active, hubspot_portal_id } = params;
 
     return prisma.client.upsert({
       where: { external_id },
@@ -46,14 +47,12 @@ export const clientService = {
         ...(name !== undefined ? { name } : {}),
         ...(active !== undefined ? { active } : {}),
         ...(hubspot_portal_id !== undefined ? { hubspot_portal_id } : {}),
-        ...(hubspot_access_token !== undefined ? { hubspot_access_token } : {}),
       },
       create: {
         external_id,
         name: name ?? external_id,
         active: active ?? true,
         hubspot_portal_id: hubspot_portal_id ?? null,
-        hubspot_access_token: hubspot_access_token ?? null,
       },
     });
   },

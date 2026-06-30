@@ -118,11 +118,11 @@ export const dncController = {
 
   /**
    * POST /admin/clients
-   * Body: { external_id, name?, active?, hubspot_portal_id?, hubspot_access_token? }
+   * Body: { external_id, name?, active?, hubspot_portal_id? }
    */
   async upsertClient(req: Request, res: Response): Promise<void> {
     try {
-      const { external_id, name, active, hubspot_portal_id, hubspot_access_token } = req.body || {};
+      const { external_id, name, active, hubspot_portal_id } = req.body || {};
       if (!external_id) {
         res.status(400).json({ error: "external_id is required" });
         return;
@@ -132,7 +132,6 @@ export const dncController = {
         name,
         active,
         hubspot_portal_id,
-        hubspot_access_token,
       });
       res.json({ status: "ok", client: publicClient(client) });
     } catch (error: any) {

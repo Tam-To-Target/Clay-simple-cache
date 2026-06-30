@@ -285,7 +285,6 @@ Create or update a client (tenant), keyed by \`external_id\`.
 | \`name\` | String | No | Display name. |
 | \`active\` | Boolean | No | Defaults to true. |
 | \`hubspot_portal_id\` | String | No | HubSpot portal ID. Tokens are resolved (and refreshed) automatically per portal, so this is all the sync needs. |
-| \`hubspot_access_token\` | String | No | Legacy/optional static token. Not required — the multi-tenant sync resolves a fresh token from \`hubspot_portal_id\`. Never returned by the API. |
 
 ### 8. Get Client
 **GET** \`/admin/clients/:external_id\`

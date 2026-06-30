@@ -5,9 +5,11 @@ import { linkedinFinderController } from './controllers/linkedin-finder.controll
 import { dncController } from './controllers/dnc.controller';
 import { hubspotController } from './controllers/hubspot.controller';
 import { phoneburnerController } from './controllers/phoneburner.controller';
+import { contactsController } from './controllers/contacts.controller';
 
 import { docsController } from './controllers/docs.controller';
 import { authMiddleware } from './middleware/auth.middleware';
+import { requireIdentity } from './middleware/identity.middleware';
 
 const router = Router();
 
@@ -35,6 +37,14 @@ router.post('/admin/dnc/discover', authMiddleware, dncController.discover);
 
 // HubSpot contact push (create/update in the client's portal)
 router.post('/admin/hubspot/contacts', authMiddleware, hubspotController.createContact);
+
+// Contact ↔ customer associations + TAM-list building (Phase 3)
+// Service-auth (API_KEY): associate a contact with a customer + reuse stats.
+router.post('/admin/contacts/associate', authMiddleware, contactsController.associate);
+router.get('/admin/contacts/reuse-stats', authMiddleware, contactsController.reuseStats);
+// User-scoped (X-User-Token, introspected against GTMOS): build a customer's
+// TAM list. The caller must have access to the customer in GTMOS.
+router.get('/clients/:slug/contacts', requireIdentity, contactsController.buildList);
 
 // PhoneBurner DNC purge (delete DNC-colliding contacts from members' books)
 router.post('/admin/phoneburner/purge', authMiddleware, phoneburnerController.purge);
