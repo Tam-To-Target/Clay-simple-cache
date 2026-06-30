@@ -29,6 +29,20 @@ export interface ListFilters {
 
 const MAX_LIMIT = 500;
 
+// Reserved keys inside the GLOBAL, cross-customer Profile.data blob that must
+// NOT be exposed through a single-customer list — they carry another tenant's
+// provenance (e.g. last_push holds the portal_id + hubspot_contact_id of
+// whichever customer most recently pushed this shared contact).
+const RESERVED_DATA_KEYS = ["last_push", "last_dnc_check"];
+
+/** Strip cross-tenant provenance from the contact data blob before returning it. */
+export function publicContactData(data: unknown): Record<string, unknown> {
+  if (!data || typeof data !== "object") return {};
+  const out: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+  for (const k of RESERVED_DATA_KEYS) delete out[k];
+  return out;
+}
+
 export const contactClientService = {
   /** Link a contact to a customer (idempotent on (contact_id, client_id)). */
   async associate(params: AssociateParams) {
@@ -82,7 +96,7 @@ export const contactClientService = {
         email: r.contact.email,
         phone_e164: r.contact.phone_e164,
         linkedin_url: r.contact.linkedin_url,
-        data: r.contact.data,
+        data: publicContactData(r.contact.data),
         source: r.source,
         reused_cache: r.reused_cache,
         first_seen_at: r.first_seen_at,

@@ -26,7 +26,13 @@ export function contactToHubSpotProperties(c: CrmContact): Record<string, any> {
   set("hs_linkedin_url", c.linkedinUrl);
   set("website", c.website);
   if (c.properties) {
-    for (const [k, v] of Object.entries(c.properties)) set(k, v);
+    // Explicit native properties are forwarded verbatim — including "" so a
+    // caller can CLEAR a field on an existing contact (PATCH semantics). Only
+    // null/undefined are dropped. (The mapped convenience fields above still
+    // skip empties, since those are sugar, not an intentional clear.)
+    for (const [k, v] of Object.entries(c.properties)) {
+      if (v !== undefined && v !== null) p[k] = v;
+    }
   }
   return p;
 }

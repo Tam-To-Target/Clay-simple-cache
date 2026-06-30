@@ -32,6 +32,16 @@ describe("contactToHubSpotProperties", () => {
     expect(p.email).toBe("x@b.com");
     expect(p.custom).toBe("1");
   });
+
+  it("preserves empty-string native properties (clear-by-empty PATCH) but drops null/undefined", () => {
+    const p = contactToHubSpotProperties({
+      email: "a@b.com",
+      properties: { jobtitle: "", company: null as any, website: undefined as any },
+    });
+    expect(p.jobtitle).toBe(""); // intentional clear must reach HubSpot
+    expect("company" in p).toBe(false);
+    expect("website" in p).toBe(false);
+  });
 });
 
 describe("hubSpotCrmAdapter.upsertContact", () => {
