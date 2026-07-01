@@ -39,6 +39,15 @@ export interface TokenIntrospection {
   clientSlugs?: string[];
 }
 
+export interface SdrPhoneburnerToken {
+  /** PhoneBurner member id (matches phoneburner_members.pb_member_id). */
+  pbMemberId: string;
+  /** Decrypted personal access token — read/delete that SDR's own PB book. */
+  token: string;
+  email: string | null;
+  status: string;
+}
+
 function config(): { baseUrl: string; secret: string } {
   const baseUrl = process.env.SDR_LAUNCH_INTERNAL_URL;
   const secret = process.env.SDR_LAUNCH_INTERNAL_SECRET;
@@ -70,6 +79,24 @@ export async function fetchClients(opts?: {
   }
   const json = (await res.json()) as { clients?: SdrLaunchClient[] };
   return json.clients ?? [];
+}
+
+/**
+ * Fetch every active SDR's PhoneBurner personal access token from GTMOS (the
+ * source of truth for these secrets). Used by the DNC purge, which must act with
+ * each SDR's OWN token. Throws on a config/transport failure.
+ */
+export async function fetchPhoneburnerTokens(): Promise<SdrPhoneburnerToken[]> {
+  const { baseUrl, secret } = config();
+  const res = await fetch(`${baseUrl}/api/internal/phoneburner-tokens`, {
+    headers: { "X-Internal-Secret": secret },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`GTMOS /api/internal/phoneburner-tokens failed: HTTP ${res.status} ${body}`);
+  }
+  const json = (await res.json()) as { tokens?: SdrPhoneburnerToken[] };
+  return json.tokens ?? [];
 }
 
 /**

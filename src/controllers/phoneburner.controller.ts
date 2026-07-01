@@ -14,8 +14,12 @@ export const phoneburnerController = {
     try {
       const { client_id, dry_run } = req.body || {};
 
-      if (!process.env.PHONEBURNER_ADMIN_TOKEN) {
-        res.status(400).json({ error: "PHONEBURNER_ADMIN_TOKEN is not configured on this service" });
+      // Member tokens are resolved from GTMOS (each SDR's own PhoneBurner PAT),
+      // so the internal-API config must be present.
+      if (!process.env.SDR_LAUNCH_INTERNAL_URL || !process.env.SDR_LAUNCH_INTERNAL_SECRET) {
+        res.status(400).json({
+          error: "SDR_LAUNCH_INTERNAL_URL and SDR_LAUNCH_INTERNAL_SECRET must be set to resolve PhoneBurner tokens from GTMOS",
+        });
         return;
       }
 

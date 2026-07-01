@@ -1,44 +1,31 @@
 /**
- * Resolves per-member PhoneBurner access tokens from one durable admin secret.
+ * Resolves per-member PhoneBurner access tokens from GTMOS.
  *
- * PhoneBurner is a single team account with many members. The admin (BOBBY)
- * token can list all members, and each member record carries a fresh
- * `oauth.bearer_token` + `expires` inline:
+ * PhoneBurner's shared admin (BOBBY) token can NEITHER reveal a member's token
+ * NOR delete from a member's book — so the DNC purge must act with each SDR's
+ * OWN personal access token. GTMOS is the source of truth for those tokens
+ * (stored encrypted, keyed by the SDR's PhoneBurner member id) and hands them to
+ * this service over the internal API:
  *
- *   GET {PHONEBURNER_API_BASE}/members?page_size=100
- *   Authorization: Bearer <PHONEBURNER_ADMIN_TOKEN>
- *   -> { members: { members: [ { user_id, ..., oauth: { bearer_token, expires } } ] } }
+ *   GET {SDR_LAUNCH_INTERNAL_URL}/api/internal/phoneburner-tokens
+ *   header: X-Internal-Secret: <SDR_LAUNCH_INTERNAL_SECRET>
+ *   -> { tokens: [ { pbMemberId, token, email, status } ] }
  *
- * So one durable admin secret resolves every member token on demand. Member
- * tokens are cached for the run and re-pulled when near expiry. We must use each
- * SDR's OWN token to read/delete that SDR's contacts (the admin token only sees
- * its own book), and that SDR must have "API Access" enabled (else 403).
+ * Tokens are cached for the run (a short TTL so rotations propagate) and
+ * re-pulled on demand (e.g. on a 401). getMemberToken returns null for a member
+ * GTMOS has no token for — the purge skips that member, never errors.
  */
 
-import { createThrottle, withRetry } from "./http-retry";
+import { fetchPhoneburnerTokens } from "./sdr-launch.service";
 
 export function phoneburnerApiBase(): string {
   return (process.env.PHONEBURNER_API_BASE || "https://www.phoneburner.com/rest/1").replace(/\/$/, "");
 }
 
-// PhoneBurner rejects requests with an empty User-Agent (403).
-const USER_AGENT = process.env.PHONEBURNER_USER_AGENT || "TAM-DNC-Cache/1.0";
-const SKEW_MS = 120_000; // treat tokens expiring within 2 min as already expired
-const MEMBERS_PAGE_SIZE = 100;
-const throttle = createThrottle(150);
-
-export class PhoneburnerConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "PhoneburnerConfigError";
-  }
-}
-
-interface MemberToken {
-  token: string;
-  expiresAtMs: number;
-  username: string | null;
-}
+// PATs are long-lived; re-pull periodically so a rotated token propagates within
+// a run. Treat a token as stale slightly early to avoid a race at the boundary.
+const CACHE_TTL_MS = 15 * 60_000;
+const SKEW_MS = 60_000;
 
 /**
  * PhoneBurner list endpoints don't return a flat array — the collection is
@@ -46,6 +33,7 @@ interface MemberToken {
  * whose elements are index-keyed maps of the real records. This flattens any of:
  * a flat array, an index-keyed map, or an array of index-keyed maps, into the
  * leaf records (identified by `isRecord`). Containers are recursed one level.
+ * (Still used by phoneburner.service for the /contacts response shape.)
  */
 export function flattenPbCollection(raw: any, isRecord: (o: any) => boolean): any[] {
   const out: any[] = [];
@@ -61,89 +49,35 @@ export function flattenPbCollection(raw: any, isRecord: (o: any) => boolean): an
   return out;
 }
 
-// memberId -> token. Populated by a full /members pull, cached for the process.
+interface MemberToken {
+  token: string;
+  expiresAtMs: number;
+  username: string | null;
+}
+
+// pbMemberId -> token. Populated from GTMOS, cached for the process.
 const cache = new Map<string, MemberToken>();
-let lastFullPullAtMs = 0;
 
-function adminToken(): string {
-  const t = process.env.PHONEBURNER_ADMIN_TOKEN;
-  if (!t) {
-    throw new PhoneburnerConfigError(
-      "PHONEBURNER_ADMIN_TOKEN is not set — required to resolve PhoneBurner member tokens."
-    );
-  }
-  return t;
-}
-
-function parseExpiry(expires: unknown, now: number): number {
-  if (typeof expires === "number" && Number.isFinite(expires)) {
-    // Heuristic: seconds-since-epoch vs ms-since-epoch vs seconds-from-now.
-    if (expires > 1e12) return expires; // ms epoch
-    if (expires > 1e9) return expires * 1000; // s epoch
-    return now + expires * 1000; // seconds from now
-  }
-  if (typeof expires === "string") {
-    const asDate = Date.parse(expires);
-    if (!Number.isNaN(asDate)) return asDate;
-    const asNum = Number(expires);
-    if (Number.isFinite(asNum)) return parseExpiry(asNum, now);
-  }
-  return now + 25 * 60_000; // safe default ~25 min
-}
-
-/** Pull ALL members from the admin token and refresh the token cache. */
+/** Pull ALL active SDR tokens from GTMOS and refresh the token cache. */
 export async function refreshMemberTokens(): Promise<Map<string, MemberToken>> {
-  const base = phoneburnerApiBase();
   const now = Date.now();
-  let page = 1;
-
+  const tokens = await fetchPhoneburnerTokens();
   cache.clear();
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const res = await withRetry(
-      (token) =>
-        fetch(`${base}/members?page_size=${MEMBERS_PAGE_SIZE}&page=${page}`, {
-          headers: { Authorization: `Bearer ${token}`, "User-Agent": USER_AGENT },
-        }),
-      async () => adminToken(),
-      { throttle, maxRetries: 5, maxTokenRefreshes: 0 }
-    );
-
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`PhoneBurner /members failed: HTTP ${res.status} ${body.slice(0, 300)}`);
-    }
-
-    const json: any = await res.json();
-    const env = json?.members ?? json;
-    const list = flattenPbCollection(
-      env?.members ?? env?.data ?? env,
-      (o) => o.user_id !== undefined || o.member_user_id !== undefined || o.oauth !== undefined
-    );
-    for (const m of list) {
-      const id = String(m?.user_id ?? m?.member_user_id ?? m?.id ?? "");
-      const bearer = m?.oauth?.bearer_token ?? m?.bearer_token ?? null;
-      if (!id || !bearer) continue;
-      cache.set(id, {
-        token: bearer,
-        expiresAtMs: parseExpiry(m?.oauth?.expires ?? m?.expires, now),
-        username: m?.username ?? m?.email_address ?? m?.email ?? null,
-      });
-    }
-
-    const totalPages = Number(env?.total_pages ?? env?.totalPages ?? 1);
-    if (!Number.isFinite(totalPages) || page >= totalPages || list.length === 0) break;
-    page++;
+  for (const t of tokens) {
+    if (!t.pbMemberId || !t.token) continue;
+    cache.set(String(t.pbMemberId), {
+      token: t.token,
+      expiresAtMs: now + CACHE_TTL_MS,
+      username: t.email ?? null,
+    });
   }
-
-  lastFullPullAtMs = now;
   return cache;
 }
 
 /**
- * Return a valid bearer token for a PhoneBurner member, or null if that member
- * is unknown to the admin account (left the team / never existed). Re-pulls the
- * member list once if the cache is empty or the cached token is near expiry.
+ * Return a valid token for a PhoneBurner member, or null if GTMOS has no token
+ * for that member (SDR never set one / left the team). Re-pulls the token list
+ * once when the cache is empty, stale, or a refresh is forced (e.g. after a 401).
  */
 export async function getMemberToken(
   memberId: string | number,
@@ -156,7 +90,6 @@ export async function getMemberToken(
   const fresh = cached && cached.expiresAtMs > now + SKEW_MS;
   if (!opts?.force && fresh) return cached!.token;
 
-  // Avoid hammering /members: only re-pull if forced, cache empty, or token stale.
   if (opts?.force || cache.size === 0 || !fresh) {
     await refreshMemberTokens();
   }
@@ -172,5 +105,4 @@ export function getMemberUsername(memberId: string | number): string | null {
 /** Test/maintenance helper — clear the in-memory token cache. */
 export function clearMemberTokenCache(): void {
   cache.clear();
-  lastFullPullAtMs = 0;
 }

@@ -30,7 +30,9 @@ describe("POST /admin/phoneburner/purge", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockPrisma.client.findMany.mockResolvedValue([]);
-    process.env.PHONEBURNER_ADMIN_TOKEN = "admin-tok";
+    // Member tokens are resolved from GTMOS; the internal-API config must be set.
+    process.env.SDR_LAUNCH_INTERNAL_URL = "https://gtmos.example";
+    process.env.SDR_LAUNCH_INTERNAL_SECRET = "secret";
   });
 
   it("401 without auth", async () => {
@@ -38,11 +40,11 @@ describe("POST /admin/phoneburner/purge", () => {
     expect(res.status).toBe(401);
   });
 
-  it("400 when PHONEBURNER_ADMIN_TOKEN is not configured", async () => {
-    delete process.env.PHONEBURNER_ADMIN_TOKEN;
+  it("400 when GTMOS internal-API config is not set", async () => {
+    delete process.env.SDR_LAUNCH_INTERNAL_URL;
     const res = await auth(request(app).post("/admin/phoneburner/purge")).send({});
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain("PHONEBURNER_ADMIN_TOKEN");
+    expect(res.body.error).toContain("SDR_LAUNCH_INTERNAL_URL");
     expect(runPurgeMock).not.toHaveBeenCalled();
   });
 

@@ -15,7 +15,8 @@ dotenv.config();
 import { runPurge, purgeOptionsFromEnv } from "../services/phoneburner-purge.service";
 
 function assertEnv(): void {
-  const required = ["DATABASE_URL", "PHONEBURNER_ADMIN_TOKEN"];
+  // Member tokens come from GTMOS (each SDR's own PAT), not a PhoneBurner admin token.
+  const required = ["DATABASE_URL", "SDR_LAUNCH_INTERNAL_URL", "SDR_LAUNCH_INTERNAL_SECRET"];
   const missing = required.filter((k) => !process.env[k]);
   if (missing.length) {
     throw new Error(
