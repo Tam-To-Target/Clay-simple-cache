@@ -123,9 +123,31 @@ model ContactClient {
   first_seen_at   DateTime @default(now()) @db.Timestamptz(6)
   last_enriched_at DateTime? @db.Timestamptz(6)
 
+  // ─── Push-to-CRM state (Phase 4) ──────────────────────────────────────────
+  // A lead pushed via POST /admin/hubspot/contacts is recorded here. When the
+  // customer's CRM isn't connected yet (no portal, or access not granted), the
+  // push is stored as 'pending' instead of erroring — we routinely build a list
+  // weeks before receiving HubSpot access. POST /admin/hubspot/backfill later
+  // replays every non-'pushed' lead once access arrives.
+  //   null        — link not created by a push (e.g. a plain associate()).
+  //   'pending'   — stored, CRM not reachable yet; awaiting backfill.
+  //   'pushed'    — live in the CRM (hubspot_contact_id set).
+  //   'failed'    — push attempted, transient/other error; backfill will retry.
+  //   'skipped_dnc' — suppressed by the client's DNC list; not pushed.
+  push_status          String?
+  // Exact CRM properties captured at request time, replayed verbatim on backfill.
+  push_properties      Json?
+  // Whether to re-enforce DNC when (re)pushing this lead.
+  push_check_dnc       Boolean   @default(true)
+  hubspot_contact_id   String?
+  push_attempts        Int       @default(0)
+  push_error           String?
+  last_push_attempt_at DateTime? @db.Timestamptz(6)
+
   @@unique([contact_id, client_id])
   @@index([client_id])
   @@index([contact_id])
+  @@index([client_id, push_status])
   @@map("contact_clients")
 }
 

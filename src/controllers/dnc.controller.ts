@@ -139,6 +139,61 @@ export const dncController = {
     }
   },
 
+  /**
+   * GET /admin/clients — list every customer with their internal name and a
+   * roll-up of their data (portal/connection, DNC coverage, contacts, and how
+   * many pushed leads are waiting on CRM access). Query: ?active=1 to filter.
+   */
+  async listClients(req: Request, res: Response): Promise<void> {
+    try {
+      const activeOnly = req.query.active === "1" || req.query.active === "true";
+      const clients = await prisma.client.findMany({
+        where: activeOnly ? { active: true } : undefined,
+        orderBy: { name: "asc" },
+      });
+
+      // Aggregate counts in one round-trip each, then stitch by client id.
+      const [sourceCounts, entryCounts, pushRows] = await Promise.all([
+        prisma.dncSource.groupBy({ by: ["client_id"], _count: { _all: true } }),
+        prisma.dncEntry.groupBy({ by: ["client_id"], _count: { _all: true } }),
+        prisma.contactClient.groupBy({
+          by: ["client_id", "push_status"],
+          _count: { _all: true },
+        }),
+      ]);
+
+      const srcById = new Map(sourceCounts.map((r) => [r.client_id, r._count._all]));
+      const entById = new Map(entryCounts.map((r) => [r.client_id, r._count._all]));
+      const contactsById = new Map<string, number>();
+      const pushById = new Map<string, Record<string, number>>();
+      for (const r of pushRows) {
+        contactsById.set(r.client_id, (contactsById.get(r.client_id) ?? 0) + r._count._all);
+        if (r.push_status) {
+          const m = pushById.get(r.client_id) ?? {};
+          m[r.push_status] = r._count._all;
+          pushById.set(r.client_id, m);
+        }
+      }
+
+      const rows = clients.map((c) => {
+        const push = pushById.get(c.id) ?? {};
+        return {
+          ...publicClient(c),
+          dnc_sources: srcById.get(c.id) ?? 0,
+          dnc_entries: entById.get(c.id) ?? 0,
+          contacts: contactsById.get(c.id) ?? 0,
+          pending_push: push.pending ?? 0,
+          failed_push: push.failed ?? 0,
+          pushed: push.pushed ?? 0,
+        };
+      });
+
+      res.json({ status: "ok", count: rows.length, clients: rows });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
+  },
+
   /** GET /admin/clients/:external_id — inspect a client + its DNC sources. */
   async getClient(req: Request, res: Response): Promise<void> {
     try {

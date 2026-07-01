@@ -26,7 +26,18 @@ export interface CrmContext {
 
 export type CrmPushResult =
   | { ok: true; action: "created" | "updated"; externalId: string }
-  | { ok: false; retryable: boolean; code: number | null; error: string };
+  | {
+      ok: false;
+      retryable: boolean;
+      code: number | null;
+      error: string;
+      /**
+       * The account isn't connected/authorized (OAuth grant missing or revoked),
+       * as opposed to a transient error. A "store the lead and backfill later"
+       * signal — callers should NOT treat this as a hard failure.
+       */
+      notConnected?: boolean;
+    };
 
 export interface CrmAdapter {
   readonly platform: string;

@@ -9,6 +9,7 @@ import {
   upsertHubspotContact,
   HubspotApiError,
 } from "../services/hubspot-contacts.service";
+import { HubspotAccessError } from "../services/hubspot-token.service";
 import type { CrmAdapter, CrmContact, CrmContext, CrmPushResult } from "./adapter";
 
 /** Map a CrmContact to HubSpot contact properties. Pure — unit-tested. */
@@ -49,6 +50,11 @@ export const hubSpotCrmAdapter: CrmAdapter = {
       const r = await upsertHubspotContact(ctx.accountId, props);
       return { ok: true, action: r.created ? "created" : "updated", externalId: r.id };
     } catch (e) {
+      if (e instanceof HubspotAccessError) {
+        // The portal's OAuth grant is missing/revoked — access isn't active yet.
+        // Not a transient failure: the caller should store & backfill later.
+        return { ok: false, retryable: false, code: e.status, error: e.message, notConnected: true };
+      }
       if (e instanceof HubspotApiError) {
         // 4xx (bad property, etc.) is fatal; 429/5xx is retryable.
         const retryable = e.status === 429 || e.status >= 500;

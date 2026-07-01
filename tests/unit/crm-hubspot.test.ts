@@ -15,6 +15,7 @@ import {
   upsertHubspotContact,
   HubspotApiError,
 } from "../../src/services/hubspot-contacts.service";
+import { HubspotAccessError } from "../../src/services/hubspot-token.service";
 import { contactToHubSpotProperties, hubSpotCrmAdapter } from "../../src/crm/hubspot.adapter";
 
 const mUpsert = vi.mocked(upsertHubspotContact);
@@ -73,5 +74,11 @@ describe("hubSpotCrmAdapter.upsertContact", () => {
     mUpsert.mockRejectedValue(new HubspotApiError("rate limited", 429));
     const r = await hubSpotCrmAdapter.upsertContact({ email: "a@b.com" }, { accountId: "p1" });
     expect(r).toMatchObject({ ok: false, retryable: true, code: 429 });
+  });
+
+  it("maps a HubspotAccessError to notConnected (store-and-backfill signal)", async () => {
+    mUpsert.mockRejectedValue(new HubspotAccessError("p1", 401, "grant revoked"));
+    const r = await hubSpotCrmAdapter.upsertContact({ email: "a@b.com" }, { accountId: "p1" });
+    expect(r).toMatchObject({ ok: false, retryable: false, code: 401, notConnected: true });
   });
 });

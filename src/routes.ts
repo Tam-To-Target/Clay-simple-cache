@@ -29,14 +29,18 @@ router.post('/dnc-check', authMiddleware, dncController.check);
 
 // DNC admin / management
 router.post('/admin/clients', authMiddleware, dncController.upsertClient);
+router.get('/admin/clients', authMiddleware, dncController.listClients);
 router.get('/admin/clients/:external_id', authMiddleware, dncController.getClient);
 router.post('/admin/dnc/sources', authMiddleware, dncController.upsertSource);
 router.post('/admin/dnc/import', authMiddleware, dncController.importCsv);
 router.post('/admin/dnc/sync', authMiddleware, dncController.sync);
 router.post('/admin/dnc/discover', authMiddleware, dncController.discover);
 
-// HubSpot contact push (create/update in the client's portal)
+// HubSpot contact push (create/update in the client's portal). If the portal
+// isn't connected yet, the lead is stored 'pending' instead of erroring.
 router.post('/admin/hubspot/contacts', authMiddleware, hubspotController.createContact);
+// Replay stored ('pending'/'failed') leads into HubSpot once access is granted.
+router.post('/admin/hubspot/backfill', authMiddleware, hubspotController.backfill);
 
 // Contact ↔ customer associations + TAM-list building (Phase 3)
 // Service-auth (API_KEY): associate a contact with a customer + reuse stats.

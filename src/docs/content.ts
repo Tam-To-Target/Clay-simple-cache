@@ -286,12 +286,47 @@ Create or update a client (tenant), keyed by \`external_id\`.
 | \`active\` | Boolean | No | Defaults to true. |
 | \`hubspot_portal_id\` | String | No | HubSpot portal ID. Tokens are resolved (and refreshed) automatically per portal, so this is all the sync needs. |
 
-### 8. Get Client
+### 8. List Clients
+**GET** \`/admin/clients\`
+
+Returns every customer with their internal name and a roll-up of their data —
+useful for a dashboard or picking a valid \`client_id\`. Add \`?active=1\` to list
+only active clients.
+
+**Response (JSON)**:
+\`\`\`json
+{
+  "status": "ok",
+  "count": 13,
+  "clients": [
+    {
+      "id": "uuid",
+      "external_id": "hilight",
+      "name": "Hilight",
+      "active": true,
+      "hubspot_portal_id": "22493085",
+      "hubspot_connected": true,
+      "dnc_sources": 2,
+      "dnc_entries": 4369,
+      "contacts": 128,
+      "pending_push": 40,
+      "failed_push": 0,
+      "pushed": 88,
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ]
+}
+\`\`\`
+\`pending_push\` is how many leads were stored for a client whose HubSpot isn't
+connected yet (see Create Contact / Backfill below). The HubSpot token is never included.
+
+### 9. Get Client
 **GET** \`/admin/clients/:external_id\`
 
 Returns the client and its DNC sources (with last-sync status). The HubSpot token is never included.
 
-### 9. Register DNC Source
+### 10. Register DNC Source
 **POST** \`/admin/dnc/sources\`
 
 | Field | Type | Required | Description |
@@ -306,7 +341,7 @@ Returns the client and its DNC sources (with last-sync status). The HubSpot toke
 > Most HubSpot-list sources are created automatically by **Discover** (below) —
 > manual registration is only needed for custom cases.
 
-### 10. Import DNC (CSV)
+### 11. Import DNC (CSV)
 **POST** \`/admin/dnc/import\`
 
 Load DNC entries from a CSV string or an explicit entries array.
@@ -325,7 +360,7 @@ Load DNC entries from a CSV string or an explicit entries array.
 
 Response: \`{ "status": "ok", "source_id": "...", "mode": "replace", "imported": 120, "skipped": 3 }\`.
 
-### 11. Sync HubSpot Lists
+### 12. Sync HubSpot Lists
 **POST** \`/admin/dnc/sync\`
 
 Refreshes membership of the **already-registered** HubSpot-list sources (full
@@ -337,7 +372,7 @@ snapshot replace per list). Does not look for new lists — use **Discover** for
 
 Response: \`{ "status": "ok", "scope": "all", "sources_synced": 4, "results": [ ... ] }\`.
 
-### 12. Discover + Sync HubSpot Lists
+### 13. Discover + Sync HubSpot Lists
 **POST** \`/admin/dnc/discover\`
 
 The cron entry point. For each client it re-scans the portal for
@@ -358,17 +393,30 @@ not synced), and the \`sync\` results.
 
 ## HubSpot Contact Push
 
-### 13. Create Contact
+### 14. Create Contact
 **POST** \`/admin/hubspot/contacts\`
 
 Create a contact in the client's HubSpot portal. If a contact with the same
 \`email\` already exists it is **updated** instead (idempotent). The token for the
 client's portal is resolved automatically.
 
-The pushed lead is also **cached as a profile** (email / phone / LinkedIn as
-identity, plus all submitted properties and attribution under \`data\`), so it is
-immediately retrievable via \`GET /profiles\`. The cached profile id is returned as
-\`cached_profile_id\`.
+**No HubSpot yet? The lead is stored, not rejected.** We routinely build a
+customer's list weeks before receiving their HubSpot access. When the client has
+no connected portal (no \`hubspot_portal_id\`, or the OAuth grant isn't active
+yet), the endpoint returns \`200\` with \`push_status: "pending"\` and persists the
+lead (with the exact properties to push). Once access is granted, replay every
+stored lead with **Backfill Stored Leads** (below). Nothing is lost and no error
+is raised for the "not connected yet" case.
+
+The lead is always **cached as a profile** (email / phone / LinkedIn as identity,
+plus all submitted properties and attribution under \`data\`), retrievable via
+\`GET /profiles\`, and linked to the customer on the \`contact_clients\` bridge with
+its \`push_status\`. The internal contact id is returned as \`contact_id\`; the
+HubSpot id (only once pushed) as \`hubspot_contact_id\`.
+
+**\`push_status\` values**: \`pushed\` (live in HubSpot) · \`pending\` (stored, waiting
+on CRM access) · \`failed\` (transient upstream error; retried by backfill) ·
+\`skipped_dnc\` (suppressed).
 
 **Request Body (JSON)**:
 | Field | Type | Required | Description |
@@ -388,15 +436,30 @@ immediately retrievable via \`GET /profiles\`. The cached profile id is returned
 {
   "status": "ok",
   "pushed": true,
+  "stored": true,
+  "push_status": "pushed",
   "created": true,
   "client_id": "tam-to-target",
   "hubspot_portal_id": "244264386",
-  "contact_id": "508943115974",
-  "dnc_checked": true,
-  "cached_profile_id": "uuid-string"
+  "contact_id": "uuid-string",
+  "hubspot_contact_id": "508943115974",
+  "dnc_checked": true
 }
 \`\`\`
 \`created\` is \`false\` when an existing contact was updated.
+
+**Response — stored, CRM not connected yet (200, JSON)**:
+\`\`\`json
+{
+  "status": "pending",
+  "pushed": false,
+  "stored": true,
+  "push_status": "pending",
+  "client_id": "acme",
+  "contact_id": "uuid-string",
+  "reason": "No HubSpot portal connected yet — lead stored; run /admin/hubspot/backfill once access is granted."
+}
+\`\`\`
 
 **Response — suppressed (with \`check_dnc: true\`, JSON)**:
 \`\`\`json
@@ -404,6 +467,7 @@ immediately retrievable via \`GET /profiles\`. The cached profile id is returned
   "status": "do_not_contact",
   "created": false,
   "pushed": false,
+  "stored": false,
   "client_id": "tam-to-target",
   "reason": "...",
   "matched_on": "email",
@@ -411,13 +475,55 @@ immediately retrievable via \`GET /profiles\`. The cached profile id is returned
 }
 \`\`\`
 
-**Errors**: \`400\` (missing required field, invalid \`campaign_type\`, or client has no portal),
+**Errors**: \`400\` (missing required field or invalid \`campaign_type\`),
 \`404\` (unknown client, with \`suggestions\`), \`422\` (HubSpot rejected a property — e.g. an
-unknown internal name), \`502\` (upstream HubSpot failure).
+unknown internal name). A **missing/inactive HubSpot connection is NOT an error** —
+it returns \`200\` with \`push_status: "pending"\`. A transient upstream failure also
+returns \`200\` (\`status: "stored_push_failed"\`, \`retryable: true\`) with the lead
+stored for backfill, so leads are never lost.
 
 ---
 
-### 14. PhoneBurner DNC purge
+### 15. Backfill Stored Leads
+**POST** \`/admin/hubspot/backfill\`
+
+Replays leads that were **stored while HubSpot wasn't connected** into the
+client's portal. Run this once a customer's HubSpot access is granted. Processes
+\`pending\` and \`failed\` leads by default, **re-checks DNC per lead** (a lead may
+have been suppressed while it waited), pushes each through the same idempotent
+upsert as Create Contact, and flips each row's \`push_status\`. Safe to re-run.
+
+**Request Body (JSON)**:
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`client_id\` | String | **Yes** | The client's \`external_id\` (slug). Must now have a connected portal. |
+| \`dry_run\` | Boolean | No | Preview only — reports what would push, changes nothing. |
+| \`limit\` | Number | No | Max leads to process this run (default 200, max 1000). Call repeatedly to drain a large backlog. |
+| \`statuses\` | Array | No | Which statuses to replay (default \`["pending","failed"]\`; also accepts \`"skipped_dnc"\`, \`"pushed"\`). |
+
+**Response (JSON)**:
+\`\`\`json
+{
+  "status": "ok",
+  "client_id": "acme",
+  "hubspot_portal_id": "244264386",
+  "dry_run": false,
+  "candidates": 40,
+  "created": 37,
+  "updated": 1,
+  "skipped_dnc": 2,
+  "still_pending": 0,
+  "failed": 0,
+  "results": [ { "contact_id": "uuid", "email": "...", "outcome": "created", "hubspot_contact_id": "..." } ]
+}
+\`\`\`
+
+**Errors**: \`400\` (missing \`client_id\`, or the client still has no \`hubspot_portal_id\`),
+\`404\` (unknown client).
+
+---
+
+### 16. PhoneBurner DNC purge
 **POST** \`/admin/phoneburner/purge\`
 
 Deletes, from each client's PhoneBurner members' dialing books, every contact
