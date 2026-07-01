@@ -16,6 +16,7 @@ dotenv.config();
 import { clientService } from "../services/client.service";
 import {
   assertSyncEnv,
+  warmupDatabase,
   discoverAndSyncAll,
   discoverAndSyncClient,
   DiscoverResult,
@@ -24,6 +25,9 @@ import {
 
 async function main() {
   assertSyncEnv();
+  // Neon autosuspends when idle; wake it (with retry) before the run so a cold
+  // compute doesn't kill the cron on its first query.
+  await warmupDatabase();
   const slug = process.argv[2];
 
   let discover: DiscoverResult[];

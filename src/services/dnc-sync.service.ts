@@ -38,6 +38,47 @@ export function dncListPrefix(): string {
 }
 
 /**
+ * Ping the database with retry/backoff before a scheduled run starts.
+ *
+ * Neon computes autosuspend when idle, so a cron that fires while the compute is
+ * asleep can fail on its very first query with `P1001 Can't reach database
+ * server` — which is exactly how the daily sync died. The web service never sees
+ * this because constant traffic keeps the compute warm. Retrying gives Neon a
+ * few seconds to resume. (Also prefer the pooled `-pooler` DATABASE_URL for
+ * scheduled jobs — it tolerates resumes far better than a direct connection.)
+ *
+ * Only connection failures (P1001) are retried; any other error is re-thrown at
+ * once. Returns once a `SELECT 1` succeeds, or throws after the last attempt.
+ */
+export async function warmupDatabase(
+  opts: { attempts?: number; baseDelayMs?: number; sleep?: (ms: number) => Promise<void> } = {}
+): Promise<void> {
+  const attempts = opts.attempts ?? 6;
+  const baseDelayMs = opts.baseDelayMs ?? 1000;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      if (i > 1) console.log(`Database reachable after ${i} attempt(s).`);
+      return;
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      const isConnErr =
+        err?.code === "P1001" ||
+        err?.errorCode === "P1001" ||
+        /can't reach database server|P1001/i.test(msg);
+      if (!isConnErr || i === attempts) throw err;
+      const delay = baseDelayMs * 2 ** (i - 1);
+      console.log(
+        `DB unreachable (attempt ${i}/${attempts}) — Neon compute may be resuming; retrying in ${delay}ms…`
+      );
+      await sleep(delay);
+    }
+  }
+}
+
+/**
  * Fail fast with a clear message if the env a sync run needs is missing.
  * Without this, a missing var dies silently on the first DB/provisioner call —
  * which is exactly how the cron service failed when its variables weren't set.
