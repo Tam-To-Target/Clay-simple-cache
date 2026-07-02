@@ -107,7 +107,8 @@ export interface HubspotListSummary {
   listId: string;
   name: string;
   processingType?: string | null;
-  size?: number | null;
+  /** Current membership size (HubSpot's hs_list_size), or null if unavailable. */
+  contact_count: number | null;
 }
 
 /**
@@ -137,7 +138,8 @@ export async function searchLists(
       listId: String(l.listId),
       name: l.name as string,
       processingType: l.processingType ?? null,
-      size: l.additionalProperties?.hs_list_size != null ? Number(l.additionalProperties.hs_list_size) : null,
+      contact_count:
+        l.additionalProperties?.hs_list_size != null ? Number(l.additionalProperties.hs_list_size) : null,
     }));
 }
 

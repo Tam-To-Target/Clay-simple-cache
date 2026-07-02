@@ -410,7 +410,7 @@ search); omit it to list.
   "client_id": "cybernut",
   "count": 3,
   "lists": [
-    { "listId": "1245", "name": "TAM - Do Not Contact (Inbound)", "processingType": "DYNAMIC", "size": 812 }
+    { "listId": "1245", "name": "TAM - Do Not Contact (Inbound)", "processingType": "DYNAMIC", "contact_count": 812 }
   ]
 }
 \`\`\`
