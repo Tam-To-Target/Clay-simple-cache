@@ -389,6 +389,17 @@ Response (per client) includes \`sources_active\`, \`deactivated\`, \`unclassifi
 (lists that matched the prefix but had no Individual/Domain suffix — reported,
 not synced), and the \`sync\` results.
 
+**Overriding the naming convention.** To sync a list that does NOT follow the
+\`(Individual)\`/\`(Domain)\` convention — or one that doesn't match the prefix at
+all — WITHOUT renaming it in HubSpot, set the env \`DNC_LIST_OVERRIDES\` (JSON,
+client-scoped so list ids can't collide across portals):
+\`\`\`
+DNC_LIST_OVERRIDES={"cybernut":{"1245":"individual"},"scantron":{"1356":"domain"}}
+\`\`\`
+Each listed id is force-classified to the given level and is **never
+auto-deactivated** by discovery. A configured id that doesn't exist in that
+client's portal is skipped. Invalid JSON / levels are ignored (logged), never fatal.
+
 ---
 
 ## HubSpot Contact Push

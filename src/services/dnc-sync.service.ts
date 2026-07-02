@@ -3,8 +3,10 @@ import type { Client, DncSource } from "@prisma/client";
 import { dncService, normalizeEntry, NormalizedDncEntry } from "./dnc.service";
 import {
   fetchListContacts,
+  fetchListById,
   searchDncLists,
   HubspotListContact,
+  DncLevel,
 } from "./hubspot-lists.service";
 import { getValidToken, HubspotAccessError } from "./hubspot-token.service";
 import { normalizeDomain } from "./normalization";
@@ -35,6 +37,39 @@ export interface DiscoverResult {
 
 export function dncListPrefix(): string {
   return process.env.DNC_LIST_NAME_PREFIX || "TAM - Do Not Contact";
+}
+
+/**
+ * Explicit per-client list-id → level overrides, from env `DNC_LIST_OVERRIDES`
+ * (JSON, client-scoped so list ids can't collide across portals):
+ *
+ *   DNC_LIST_OVERRIDES={"cybernut":{"1245":"individual"},"scantron":{"1356":"domain"}}
+ *
+ * Lets you sync a DNC list that does NOT follow the (Individual)/(Domain) naming
+ * convention — or one that doesn't match the prefix at all — WITHOUT renaming it
+ * in HubSpot. An overridden list is force-classified to the given level and is
+ * never auto-deactivated by discovery. Returns an empty map on missing/invalid
+ * config (logged, never throws).
+ */
+export function dncListOverrides(): Map<string, Map<string, DncLevel>> {
+  const raw = process.env.DNC_LIST_OVERRIDES;
+  const out = new Map<string, Map<string, DncLevel>>();
+  if (!raw || !raw.trim()) return out;
+  try {
+    const obj = JSON.parse(raw) as Record<string, Record<string, string>>;
+    for (const [clientSlug, lists] of Object.entries(obj)) {
+      const m = new Map<string, DncLevel>();
+      for (const [listId, level] of Object.entries(lists || {})) {
+        const lv = String(level).toLowerCase();
+        if (lv === "individual" || lv === "domain") m.set(String(listId), lv as DncLevel);
+        else console.warn(`[dnc] DNC_LIST_OVERRIDES[${clientSlug}][${listId}]: invalid level "${level}" — ignored`);
+      }
+      if (m.size) out.set(clientSlug, m);
+    }
+  } catch (e: any) {
+    console.warn(`[dnc] DNC_LIST_OVERRIDES is not valid JSON — ignoring: ${e?.message || e}`);
+  }
+  return out;
 }
 
 /**
@@ -244,7 +279,30 @@ export async function discoverClient(client: Client): Promise<DiscoverResult> {
   let lists;
   try {
     const portalId = client.hubspot_portal_id;
-    lists = await searchDncLists((force) => getValidToken(portalId, { force }), dncListPrefix());
+    const token = (force?: boolean) => getValidToken(portalId, { force });
+    lists = await searchDncLists(token, dncListPrefix());
+
+    // Apply explicit id→level overrides for this client: force-classify listed
+    // ids (any name), and pull in overridden lists the prefix search missed —
+    // so a list outside the (Individual)/(Domain) convention syncs WITHOUT a
+    // rename. A missing override list in this portal (404) is skipped, never fatal.
+    const overrides = dncListOverrides().get(client.external_id);
+    if (overrides && overrides.size > 0) {
+      const found = new Set(lists.map((l) => l.listId));
+      for (const l of lists) {
+        const lv = overrides.get(l.listId);
+        if (lv) l.level = lv; // override the classification (e.g. "(Inbound)" → individual)
+      }
+      for (const [listId, lv] of overrides) {
+        if (found.has(listId)) continue;
+        try {
+          const meta = await fetchListById(token, listId);
+          if (meta) lists.push({ listId: meta.listId, name: meta.name, level: lv });
+        } catch (e: any) {
+          console.warn(`[dnc] override list ${listId} unreachable for ${client.external_id}: ${e?.message || e}`);
+        }
+      }
+    }
   } catch (err: any) {
     // Access revoked (app uninstalled / grant gone) → skip, not a hard error.
     const status = err instanceof HubspotAccessError ? ("no_access" as const) : ("error" as const);

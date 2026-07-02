@@ -1,7 +1,34 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { classifyDncList } from "../../src/services/hubspot-lists.service";
-import { extractCorporateDomain } from "../../src/services/dnc-sync.service";
+import { extractCorporateDomain, dncListOverrides } from "../../src/services/dnc-sync.service";
 import { suggestSimilar } from "../../src/services/suggest";
+
+describe("dncListOverrides", () => {
+  afterEach(() => {
+    delete process.env.DNC_LIST_OVERRIDES;
+  });
+
+  it("parses client-scoped id→level overrides", () => {
+    process.env.DNC_LIST_OVERRIDES = '{"cybernut":{"1245":"individual"},"scantron":{"1356":"domain"}}';
+    const o = dncListOverrides();
+    expect(o.get("cybernut")?.get("1245")).toBe("individual");
+    expect(o.get("scantron")?.get("1356")).toBe("domain");
+  });
+
+  it("drops invalid levels but keeps valid ones", () => {
+    process.env.DNC_LIST_OVERRIDES = '{"cybernut":{"1245":"inbound","9":"domain"}}';
+    const o = dncListOverrides();
+    expect(o.get("cybernut")?.has("1245")).toBe(false);
+    expect(o.get("cybernut")?.get("9")).toBe("domain");
+  });
+
+  it("returns an empty map for missing or invalid JSON (never throws)", () => {
+    delete process.env.DNC_LIST_OVERRIDES;
+    expect(dncListOverrides().size).toBe(0);
+    process.env.DNC_LIST_OVERRIDES = "not json";
+    expect(dncListOverrides().size).toBe(0);
+  });
+});
 
 describe("classifyDncList", () => {
   it("classifies (Domain) lists, including client-suffixed names", () => {

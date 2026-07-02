@@ -82,6 +82,27 @@ export async function searchDncLists(
     }));
 }
 
+/**
+ * Fetch a single list's metadata (name) by id. Returns null if the list doesn't
+ * exist in this portal (404) — used by the id→level override path, where an
+ * override configured for one client won't exist in another client's portal.
+ */
+export async function fetchListById(
+  tokenProvider: TokenProvider,
+  listId: string
+): Promise<{ listId: string; name: string } | null> {
+  const res = await hsFetch(`/crm/v3/lists/${encodeURIComponent(listId)}`, tokenProvider);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HubSpot get list ${listId} failed: HTTP ${res.status} ${body}`);
+  }
+  const json = (await res.json()) as { list?: any; name?: string; listId?: string };
+  const l = json.list ?? json;
+  if (!l || typeof l.name !== "string") return null;
+  return { listId: String(l.listId ?? listId), name: l.name };
+}
+
 interface MembershipsResponse {
   results?: { recordId: string }[];
   paging?: { next?: { after?: string } };
