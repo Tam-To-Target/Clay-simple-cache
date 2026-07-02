@@ -55,6 +55,10 @@ async function main() {
       `${t.protected_other_client ? `, ${t.protected_other_client} kept (shared-book)` : ""}.`
   );
 
+  // Per-client rollup ("X removed on <client>") is logged live by runPurge as
+  // each client finishes — see the [purge] lines above. Here we print the
+  // per-member detail for deeper debugging.
+  console.log("\nPer-member detail:");
   for (const c of summary.clients) {
     for (const m of c.members) {
       const tag =

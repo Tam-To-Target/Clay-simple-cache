@@ -60,6 +60,7 @@ export interface MemberPurgeResult {
 
 export interface ClientPurgeResult {
   client_external_id: string;
+  client_name: string;
   members: MemberPurgeResult[];
 }
 
@@ -313,13 +314,14 @@ export async function purgeClient(
   const members = await prisma.phoneburnerMember.findMany({
     where: { client_id: client.id, active: true },
   });
-  if (members.length === 0) return { client_external_id: client.external_id, members: [] };
+  if (members.length === 0) return { client_external_id: client.external_id, client_name: client.name, members: [] };
 
   const sets = await ctx.getSets(client.id);
   // No DNC entries → nothing to collide; don't waste a full PB scan.
   if (sets.emails.size === 0 && sets.phones.size === 0 && sets.domains.size === 0) {
     return {
       client_external_id: client.external_id,
+      client_name: client.name,
       members: members.map((m) => ({
         pb_member_id: m.pb_member_id,
         pb_username: m.pb_username,
@@ -339,7 +341,7 @@ export async function purgeClient(
     const guardSets = await Promise.all((servingIds.length ? servingIds : [client.id]).map(ctx.getSets));
     results.push(await purgeMember(client, member, sets, guardSets, opts, runId, counters));
   }
-  return { client_external_id: client.external_id, members: results };
+  return { client_external_id: client.external_id, client_name: client.name, members: results };
 }
 
 export interface PurgeRunSummary {
@@ -361,6 +363,30 @@ export interface PurgeRunSummary {
 }
 
 const SKIPPED: MemberStatus[] = ["skipped_no_token", "skipped_no_access", "skipped_no_dnc", "aborted_ratio"];
+
+/**
+ * Log a one-line per-client rollup as each client finishes — the "how many
+ * removed on <client>" view that makes each run easy to debug. Logged from
+ * runPurge so it shows for EVERY trigger (CLI, HTTP endpoint, cron) in the
+ * service logs.
+ */
+function logClientResult(c: ClientPurgeResult, dryRun: boolean): void {
+  const removed = c.members.reduce((n, m) => n + m.deleted, 0);
+  const failed = c.members.reduce((n, m) => n + m.failed, 0);
+  const scanned = c.members.reduce((n, m) => n + m.contacts_scanned, 0);
+  const skipped = c.members.filter((m) => SKIPPED.includes(m.status)).length;
+  const extra = [
+    `scanned ${scanned}`,
+    failed ? `${failed} failed` : "",
+    skipped ? `${skipped} member(s) skipped` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+  console.log(
+    `[purge] ${c.client_name} (${c.client_external_id}): ` +
+      `${removed} ${dryRun ? "would remove" : "removed"} — ${extra}`
+  );
+}
 
 /** Run the purge for one client (by external_id) or all eligible clients. */
 export async function runPurge(
@@ -416,11 +442,14 @@ export async function runPurge(
   let hadError = false;
   for (const client of clients) {
     try {
-      clientResults.push(await purgeClient(client, opts, run.id, counters, ctx));
+      const cr = await purgeClient(client, opts, run.id, counters, ctx);
+      clientResults.push(cr);
+      logClientResult(cr, opts.dryRun);
     } catch (err: any) {
       hadError = true;
-      clientResults.push({
+      const cr: ClientPurgeResult = {
         client_external_id: client.external_id,
+        client_name: client.name,
         members: [
           {
             pb_member_id: "-",
@@ -433,7 +462,9 @@ export async function runPurge(
             error: err?.message || String(err),
           },
         ],
-      });
+      };
+      clientResults.push(cr);
+      logClientResult(cr, opts.dryRun);
     }
   }
 
