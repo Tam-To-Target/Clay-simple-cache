@@ -13,9 +13,12 @@ import { parseCsv, resolveColumn } from "../dnc/csv";
 import {
   syncAllHubspotSources,
   syncClient,
+  syncHubspotSource,
   discoverAndSyncAll,
   discoverAndSyncClient,
 } from "../services/dnc-sync.service";
+import { fetchListById, searchLists } from "../services/hubspot-lists.service";
+import { getValidToken } from "../services/hubspot-token.service";
 
 export const dncController = {
   /**
@@ -211,6 +214,106 @@ export const dncController = {
       }
       const { dnc_sources, ...rest } = client;
       res.json({ client: { ...publicClient(rest as any), dnc_sources } });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
+  },
+
+  /**
+   * GET /admin/dnc/hubspot-lists?client_id=<slug>&q=<name>
+   * Look up a client's HubSpot lists (id + name) so a caller can find a list id
+   * from its name before pinning it as a DNC source. `q` filters by name (HubSpot
+   * list search); omit to list lists.
+   */
+  async hubspotLists(req: Request, res: Response): Promise<void> {
+    try {
+      const clientId = String(req.query.client_id || "");
+      const q = typeof req.query.q === "string" ? req.query.q : "";
+      if (!clientId) {
+        res.status(400).json({ error: "client_id query param is required" });
+        return;
+      }
+      const client = await clientService.getByExternalId(clientId);
+      if (!client || !client.active) {
+        const suggestions = await clientSuggestions(clientId);
+        res.status(404).json({
+          error: `Unknown or inactive client_id: ${clientId}`,
+          ...(suggestions.length ? { suggestions } : {}),
+        });
+        return;
+      }
+      if (!client.hubspot_portal_id) {
+        res.status(400).json({ error: `Client ${clientId} has no hubspot_portal_id` });
+        return;
+      }
+      const portalId = client.hubspot_portal_id;
+      const lists = await searchLists((force) => getValidToken(portalId, { force }), q);
+      res.json({ status: "ok", client_id: clientId, count: lists.length, lists });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
+  },
+
+  /**
+   * POST /admin/dnc/lists
+   * Body: { client_id, hubspot_list_id, dnc_level: 'individual'|'domain' }
+   * Pin a HubSpot list as a DNC source for a client REGARDLESS of its name — the
+   * programmatic way to add lists outside the (Individual)/(Domain) convention.
+   * Stored with origin='manual' so discovery never auto-deactivates it, then
+   * synced immediately.
+   */
+  async addList(req: Request, res: Response): Promise<void> {
+    try {
+      const { client_id, hubspot_list_id, dnc_level } = req.body || {};
+      if (!client_id || !hubspot_list_id || !dnc_level) {
+        res.status(400).json({ error: "client_id, hubspot_list_id, and dnc_level are required" });
+        return;
+      }
+      const level = String(dnc_level).toLowerCase();
+      if (level !== "individual" && level !== "domain") {
+        res.status(400).json({ error: "dnc_level must be 'individual' or 'domain'" });
+        return;
+      }
+      const client = await clientService.getByExternalId(client_id);
+      if (!client || !client.active) {
+        const suggestions = await clientSuggestions(client_id);
+        res.status(404).json({
+          error: `Unknown or inactive client_id: ${client_id}`,
+          ...(suggestions.length ? { suggestions } : {}),
+        });
+        return;
+      }
+      if (!client.hubspot_portal_id) {
+        res.status(400).json({ error: `Client ${client_id} has no hubspot_portal_id` });
+        return;
+      }
+
+      const listId = String(hubspot_list_id);
+      const portalId = client.hubspot_portal_id;
+      // Validate the list exists in this portal + capture its name for the label.
+      const meta = await fetchListById((force) => getValidToken(portalId, { force }), listId);
+      if (!meta) {
+        res.status(404).json({ error: `HubSpot list ${listId} not found in portal ${portalId}` });
+        return;
+      }
+
+      const source = await prisma.dncSource.upsert({
+        where: { client_id_hubspot_list_id: { client_id: client.id, hubspot_list_id: listId } },
+        update: { origin: "manual", dnc_level: level, label: meta.name, active: true },
+        create: {
+          client_id: client.id,
+          type: "hubspot_list",
+          origin: "manual",
+          hubspot_list_id: listId,
+          label: meta.name,
+          dnc_level: level,
+          active: true,
+        },
+      });
+
+      // Sync membership right away so the pin is immediately effective.
+      const sync = await syncHubspotSource(client, source);
+      res.json({ status: "ok", client_id, source, sync });
     } catch (error: any) {
       res.status(500).json({ error: error.message || "Internal server error" });
     }

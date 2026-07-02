@@ -103,6 +103,44 @@ export async function fetchListById(
   return { listId: String(l.listId ?? listId), name: l.name };
 }
 
+export interface HubspotListSummary {
+  listId: string;
+  name: string;
+  processingType?: string | null;
+  size?: number | null;
+}
+
+/**
+ * Search a portal's HubSpot lists by name (or list all when query is empty).
+ * Used by the admin lookup endpoint so a caller can find a list id from its name
+ * before pinning it as a DNC source. Not prefix-filtered.
+ */
+export async function searchLists(
+  tokenProvider: TokenProvider,
+  query = "",
+  count = 100
+): Promise<HubspotListSummary[]> {
+  const res = await hsFetch(`/crm/v3/lists/search`, tokenProvider, {
+    method: "POST",
+    body: JSON.stringify({ query, count }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HubSpot list search failed: HTTP ${res.status} ${body}`);
+  }
+  const json = (await res.json()) as ListSearchResponse;
+  const items = (json.lists || []) as any[];
+  return items
+    .map((i) => (i && i.list ? i.list : i))
+    .filter((l) => l && l.listId != null && typeof l.name === "string")
+    .map((l) => ({
+      listId: String(l.listId),
+      name: l.name as string,
+      processingType: l.processingType ?? null,
+      size: l.additionalProperties?.hs_list_size != null ? Number(l.additionalProperties.hs_list_size) : null,
+    }));
+}
+
 interface MembershipsResponse {
   results?: { recordId: string }[];
   paging?: { next?: { after?: string } };

@@ -389,22 +389,58 @@ Response (per client) includes \`sources_active\`, \`deactivated\`, \`unclassifi
 (lists that matched the prefix but had no Individual/Domain suffix — reported,
 not synced), and the \`sync\` results.
 
-**Overriding the naming convention.** To sync a list that does NOT follow the
-\`(Individual)\`/\`(Domain)\` convention — or one that doesn't match the prefix at
-all — WITHOUT renaming it in HubSpot, set the env \`DNC_LIST_OVERRIDES\` (JSON,
-client-scoped so list ids can't collide across portals):
+Every source discovery creates is marked \`origin: "discovered"\` and is subject
+to auto-deactivation. Lists **pinned manually** (see *Pin a DNC List* below) are
+\`origin: "manual"\` and are **never** auto-deactivated — they're the registry of
+record for lists outside the naming convention.
+
+---
+
+### 14. Look up HubSpot Lists
+**GET** \`/admin/dnc/hubspot-lists?client_id=<slug>&q=<name>\`
+
+Return a client's HubSpot lists (id + name) so you can find a list id from its
+name before pinning it as a DNC source. \`q\` filters by name (HubSpot list
+search); omit it to list.
+
+**Response (JSON)**:
+\`\`\`json
+{
+  "status": "ok",
+  "client_id": "cybernut",
+  "count": 3,
+  "lists": [
+    { "listId": "1245", "name": "TAM - Do Not Contact (Inbound)", "processingType": "DYNAMIC", "size": 812 }
+  ]
+}
 \`\`\`
-DNC_LIST_OVERRIDES={"cybernut":{"1245":"individual"},"scantron":{"1356":"domain"}}
-\`\`\`
-Each listed id is force-classified to the given level and is **never
-auto-deactivated** by discovery. A configured id that doesn't exist in that
-client's portal is skipped. Invalid JSON / levels are ignored (logged), never fatal.
+**Errors**: \`400\` (missing \`client_id\` / client has no portal), \`404\` (unknown client).
+
+### 15. Pin a DNC List
+**POST** \`/admin/dnc/lists\`
+
+Pin ANY HubSpot list as a DNC source for a client **regardless of its name** —
+the programmatic way to add lists that don't follow the \`(Individual)\`/\`(Domain)\`
+convention. The source is stored with \`origin: "manual"\` (so discovery never
+auto-deactivates it) and its membership is synced immediately. Idempotent per
+(client, list).
+
+**Request Body (JSON)**:
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`client_id\` | String | **Yes** | The client's \`external_id\` (slug). |
+| \`hubspot_list_id\` | String | **Yes** | The HubSpot list id (see *Look up HubSpot Lists*). |
+| \`dnc_level\` | String | **Yes** | \`individual\` (exact email/phone) or \`domain\` (also the member's company email domain). |
+
+**Response (JSON)**: \`{ "status": "ok", "client_id": "...", "source": { … }, "sync": { "status": "ok", "entry_count": 812, … } }\`.
+
+**Errors**: \`400\` (missing/invalid fields, or client has no portal), \`404\` (unknown client, or the list id doesn't exist in that portal).
 
 ---
 
 ## HubSpot Contact Push
 
-### 14. Create Contact
+### 16. Create Contact
 **POST** \`/admin/hubspot/contacts\`
 
 Create a contact in the client's HubSpot portal. If a contact with the same
@@ -495,7 +531,7 @@ stored for backfill, so leads are never lost.
 
 ---
 
-### 15. Backfill Stored Leads
+### 17. Backfill Stored Leads
 **POST** \`/admin/hubspot/backfill\`
 
 Replays leads that were **stored while HubSpot wasn't connected** into the
@@ -534,7 +570,7 @@ upsert as Create Contact, and flips each row's \`push_status\`. Safe to re-run.
 
 ---
 
-### 16. PhoneBurner DNC purge
+### 18. PhoneBurner DNC purge
 **POST** \`/admin/phoneburner/purge\`
 
 Deletes, from each client's PhoneBurner members' dialing books, every contact

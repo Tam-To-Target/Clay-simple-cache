@@ -31,6 +31,8 @@ router.post('/dnc-check', authMiddleware, dncController.check);
 router.post('/admin/clients', authMiddleware, dncController.upsertClient);
 router.get('/admin/clients', authMiddleware, dncController.listClients);
 router.get('/admin/clients/:external_id', authMiddleware, dncController.getClient);
+router.get('/admin/dnc/hubspot-lists', authMiddleware, dncController.hubspotLists);
+router.post('/admin/dnc/lists', authMiddleware, dncController.addList);
 router.post('/admin/dnc/sources', authMiddleware, dncController.upsertSource);
 router.post('/admin/dnc/import', authMiddleware, dncController.importCsv);
 router.post('/admin/dnc/sync', authMiddleware, dncController.sync);

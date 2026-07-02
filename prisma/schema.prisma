@@ -159,6 +159,13 @@ model DncSource {
   client_id        String    @db.Uuid
   client           Client    @relation(fields: [client_id], references: [id], onDelete: Cascade)
   type             String    // 'csv' | 'hubspot_list'
+  // How this source is managed:
+  //   'discovered' — found + maintained by the name-convention discovery; may be
+  //                  auto-deactivated when its list disappears from the portal.
+  //   'manual'     — pinned via POST /admin/dnc/lists (any name, any list). NEVER
+  //                  auto-deactivated by discovery; the registry of record for
+  //                  lists outside the (Individual)/(Domain) naming convention.
+  origin           String    @default("discovered")
   // Suppression level for a HubSpot-list source:
   //   'individual' — exact email/phone match only.
   //   'domain'     — also suppresses each member's (corporate) email domain.

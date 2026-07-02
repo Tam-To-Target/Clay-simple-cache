@@ -200,4 +200,56 @@ describe("DNC API", () => {
       expect(res.status).toBe(400);
     });
   });
+
+  describe("POST /admin/dnc/lists (pin a list, any name)", () => {
+    it("401 without auth", async () => {
+      const res = await request(app)
+        .post("/admin/dnc/lists")
+        .send({ client_id: "cust_1", hubspot_list_id: "42", dnc_level: "individual" });
+      expect(res.status).toBe(401);
+    });
+
+    it("400 when required fields are missing", async () => {
+      const res = await auth(request(app).post("/admin/dnc/lists")).send({ client_id: "cust_1" });
+      expect(res.status).toBe(400);
+    });
+
+    it("400 for an invalid dnc_level", async () => {
+      const res = await auth(request(app).post("/admin/dnc/lists")).send({
+        client_id: "cust_1",
+        hubspot_list_id: "42",
+        dnc_level: "inbound",
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("dnc_level");
+    });
+
+    it("404 for an unknown client", async () => {
+      mockPrisma.client.findUnique.mockResolvedValue(null);
+      mockPrisma.client.findMany.mockResolvedValue([{ external_id: "cust_1", name: "Cust", active: true }]);
+      const res = await auth(request(app).post("/admin/dnc/lists")).send({
+        client_id: "nope",
+        hubspot_list_id: "42",
+        dnc_level: "domain",
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it("400 when the client has no HubSpot portal", async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ ...CLIENT, hubspot_portal_id: null });
+      const res = await auth(request(app).post("/admin/dnc/lists")).send({
+        client_id: "cust_1",
+        hubspot_list_id: "42",
+        dnc_level: "individual",
+      });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe("GET /admin/dnc/hubspot-lists (id lookup)", () => {
+    it("400 without client_id", async () => {
+      const res = await auth(request(app).get("/admin/dnc/hubspot-lists"));
+      expect(res.status).toBe(400);
+    });
+  });
 });
