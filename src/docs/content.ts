@@ -535,8 +535,10 @@ endpoint triggers it on demand. See \`PHONEBURNER_DNC_PURGE_PLAN.md\`.
 **Safety rails**: dry-run by default (\`PB_PURGE_DRY_RUN\`, only real deletes when
 explicitly \`false\` or \`dry_run:false\`); every deletion is backed up
 (re-importable snapshot) to \`phoneburner_deletions\` before removal; a member is
-aborted if collisions exceed \`PB_PURGE_MAX_RATIO\` of its book; an optional
-\`PB_PURGE_MAX_DELETES_PER_RUN\` circuit breaker; deletes are idempotent.
+**aborted entirely if more than 30% of its book is on the DNC** — a hard ceiling
+that protects a legitimate campaign into a suppressed segment or a corrupt DNC
+sync. \`PB_PURGE_MAX_RATIO\` can set a **stricter** (lower) gate but can never raise
+it above 30%. Optional \`PB_PURGE_MAX_DELETES_PER_RUN\` circuit breaker; deletes are idempotent.
 
 **Request Body (JSON)**:
 | Field | Type | Required | Description |

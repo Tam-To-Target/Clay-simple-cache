@@ -69,13 +69,26 @@ export interface DncSets {
   domains: Set<string>;
 }
 
+/**
+ * Hard ceiling on the per-member collision ratio. A book more than this fraction
+ * on the DNC is NEVER purged — the whole member aborts. Guards the case where a
+ * client is running a legitimate campaign INTO a heavily-suppressed segment
+ * (e.g. StudentBridge, ~82% on DNC by design), as well as a corrupt/over-broad
+ * DNC sync. PB_PURGE_MAX_RATIO may set a STRICTER (lower) gate, but can never
+ * raise it above this ceiling.
+ */
+export const HARD_MAX_RATIO = 0.3;
+
 export function purgeOptionsFromEnv(overrides?: Partial<PurgeOptions>): PurgeOptions {
   const ratio = Number(process.env.PB_PURGE_MAX_RATIO);
   const cap = Number(process.env.PB_PURGE_MAX_DELETES_PER_RUN);
+  const requestedRatio =
+    overrides?.maxRatio ?? (Number.isFinite(ratio) && ratio > 0 ? ratio : HARD_MAX_RATIO);
   return {
     // Dry-run unless EXPLICITLY disabled — deletes are destructive.
     dryRun: overrides?.dryRun ?? process.env.PB_PURGE_DRY_RUN !== "false",
-    maxRatio: overrides?.maxRatio ?? (Number.isFinite(ratio) && ratio > 0 ? ratio : 0.4),
+    // Clamp to the hard ceiling — config can only tighten the gate, never loosen it.
+    maxRatio: Math.min(HARD_MAX_RATIO, requestedRatio),
     includeDomains: overrides?.includeDomains ?? process.env.PB_PURGE_INCLUDE_DOMAINS !== "false",
     maxDeletesPerRun: overrides?.maxDeletesPerRun ?? (Number.isFinite(cap) && cap > 0 ? cap : null),
   };
@@ -211,8 +224,10 @@ export async function purgeMember(
   base.collisions = collisions.length;
   if (protectedByOtherClient > 0) base.protected_other_client = protectedByOtherClient;
 
-  // Safety gate — a collision ratio this high signals a corrupt DNC sync, not a
-  // legitimately dirty book. Abort this member's deletes; surface for review.
+  // Safety gate — a collision ratio this high signals a legitimate campaign into
+  // a suppressed segment or a corrupt/over-broad DNC sync, NOT a normally dirty
+  // book. Abort this member's deletes entirely; surface for review. Never purge
+  // most of a book. (opts.maxRatio is clamped to HARD_MAX_RATIO upstream.)
   if (contacts.length > 0 && collisions.length / contacts.length > opts.maxRatio) {
     await touchMember(member.id, { api_access_ok: true });
     return { ...base, status: "aborted_ratio" };

@@ -129,6 +129,18 @@ describe("purgeOptionsFromEnv", () => {
     expect(purgeOptionsFromEnv().dryRun).toBe(false);
     delete process.env.PB_PURGE_DRY_RUN;
   });
+
+  it("clamps maxRatio to the 0.30 hard ceiling — config can only tighten, never loosen", () => {
+    delete process.env.PB_PURGE_MAX_RATIO;
+    expect(purgeOptionsFromEnv().maxRatio).toBe(0.3); // default = ceiling
+    expect(purgeOptionsFromEnv({ maxRatio: 0.9 }).maxRatio).toBe(0.3); // override can't loosen
+    expect(purgeOptionsFromEnv({ maxRatio: 0.1 }).maxRatio).toBe(0.1); // override can tighten
+    process.env.PB_PURGE_MAX_RATIO = "0.8";
+    expect(purgeOptionsFromEnv().maxRatio).toBe(0.3); // env can't loosen
+    process.env.PB_PURGE_MAX_RATIO = "0.15";
+    expect(purgeOptionsFromEnv().maxRatio).toBe(0.15); // env can tighten
+    delete process.env.PB_PURGE_MAX_RATIO;
+  });
 });
 
 describe("purgeMember", () => {
@@ -154,16 +166,17 @@ describe("purgeMember", () => {
 
   it("dry-run: writes dry_run audit rows and does NOT delete", async () => {
     tokenMock.mockResolvedValue("tok");
-    // 1 collision in 3 contacts → ratio 0.33, under the 0.4 gate.
+    // 1 collision in 4 contacts → ratio 0.25, under the 0.30 gate.
     fetchMock.mockResolvedValue([
       contact({ id: "c1", emails: ["a@b.com"] }),
       contact({ id: "c2", emails: ["safe@x.com"] }),
       contact({ id: "c3", emails: ["safe2@x.com"] }),
+      contact({ id: "c4", emails: ["safe3@x.com"] }),
     ]);
     const s = sets(["a@b.com"], [], []);
     const r = await purgeMember(CLIENT, MEMBER, s, solo(s), OPTS, "run1", counters());
     expect(r.status).toBe("ok");
-    expect(r.contacts_scanned).toBe(3);
+    expect(r.contacts_scanned).toBe(4);
     expect(r.collisions).toBe(1);
     expect(r.deleted).toBe(1); // "would delete"
     expect(deleteMock).not.toHaveBeenCalled();
@@ -174,10 +187,12 @@ describe("purgeMember", () => {
   it("live: backs up then deletes the colliding contact", async () => {
     const liveOpts = { ...OPTS, dryRun: false };
     tokenMock.mockResolvedValue("tok");
+    // 1 collision in 4 → 0.25, under the 0.30 gate.
     fetchMock.mockResolvedValue([
       contact({ id: "c1", phones: ["(415) 555-1212"] }),
       contact({ id: "c2", phones: ["+19998887777"] }),
       contact({ id: "c3", emails: ["safe@x.com"] }),
+      contact({ id: "c4", emails: ["safe2@x.com"] }),
     ]);
     deleteMock.mockResolvedValue({ ok: true, status: 204, alreadyGone: false });
     const c = counters();
@@ -211,6 +226,7 @@ describe("purgeMember", () => {
       contact({ id: "c1", emails: ["a@b.com"] }),
       contact({ id: "c2", emails: ["safe@x.com"] }),
       contact({ id: "c3", emails: ["safe2@x.com"] }),
+      contact({ id: "c4", emails: ["safe3@x.com"] }),
     ]);
     deleteMock.mockResolvedValue({ ok: false, status: 500, alreadyGone: false });
     const s = sets(["a@b.com"], [], []);
@@ -244,6 +260,7 @@ describe("purgeMember", () => {
       contact({ id: "c1", emails: ["dnc-everywhere@b.com"] }),
       contact({ id: "c2", emails: ["safe@x.com"] }),
       contact({ id: "c3", emails: ["safe2@x.com"] }),
+      contact({ id: "c4", emails: ["safe3@x.com"] }),
     ]);
     deleteMock.mockResolvedValue({ ok: true, status: 204, alreadyGone: false });
     const clientA = sets(["dnc-everywhere@b.com"], [], []);
