@@ -20,6 +20,11 @@ const MAX_RETRIES = 5;
 const MAX_CONTACT_PAGES = 1000;
 const throttle = createThrottle(150); // ~6-7 req/s per process, well under PB limits
 
+/** Optional per-call throttle override — see {@link createKeyedThrottle} in http-retry. */
+export interface PbCallOpts {
+  throttle?: () => Promise<void>;
+}
+
 /** Raised when a member's PhoneBurner account does not have API Access enabled. */
 export class PhoneburnerAccessError extends Error {
   constructor(public memberId: string, message: string) {
@@ -46,7 +51,8 @@ export interface PbContact {
 async function pbFetch(
   path: string,
   getToken: (force?: boolean) => Promise<string>,
-  init?: RequestInit
+  init?: RequestInit,
+  throttleOverride?: () => Promise<void>
 ): Promise<Response> {
   const base = phoneburnerApiBase();
   return withRetry(
@@ -60,7 +66,7 @@ async function pbFetch(
         },
       }),
     getToken,
-    { throttle, maxRetries: MAX_RETRIES, maxTokenRefreshes: 2 }
+    { throttle: throttleOverride ?? throttle, maxRetries: MAX_RETRIES, maxTokenRefreshes: 2 }
   );
 }
 
@@ -106,7 +112,8 @@ export function normalizePbContact(rec: any): PbContact {
 export async function fetchMemberContacts(
   memberId: string,
   getToken: (force?: boolean) => Promise<string>,
-  onProgress?: (fetched: number) => void
+  onProgress?: (fetched: number) => void,
+  opts?: PbCallOpts
 ): Promise<PbContact[]> {
   const out: PbContact[] = [];
   let page = 1;
@@ -114,7 +121,12 @@ export async function fetchMemberContacts(
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const res = await pbFetch(`/contacts?page_size=${CONTACTS_PAGE_SIZE}&page=${page}`, getToken);
+    const res = await pbFetch(
+      `/contacts?page_size=${CONTACTS_PAGE_SIZE}&page=${page}`,
+      getToken,
+      undefined,
+      opts?.throttle
+    );
 
     if (res.status === 403) {
       // The admin-resolved token is valid, so a 403 means this member's account
@@ -178,10 +190,66 @@ export interface DeleteResult {
 /** Delete one PhoneBurner contact. Idempotent: a 404 counts as success. */
 export async function deletePbContact(
   contactId: string,
-  getToken: (force?: boolean) => Promise<string>
+  getToken: (force?: boolean) => Promise<string>,
+  opts?: PbCallOpts
 ): Promise<DeleteResult> {
-  const res = await pbFetch(`/contacts/${encodeURIComponent(contactId)}`, getToken, { method: "DELETE" });
+  const res = await pbFetch(
+    `/contacts/${encodeURIComponent(contactId)}`,
+    getToken,
+    { method: "DELETE" },
+    opts?.throttle
+  );
   if (res.status === 404) return { ok: true, status: 404, alreadyGone: true };
   const ok = res.status === 200 || res.status === 202 || res.status === 204;
   return { ok, status: res.status, alreadyGone: false };
+}
+
+/**
+ * Fetch a single PhoneBurner contact by id — used by the targeted purge path
+ * to get a live snapshot before deleting (the identity index can be stale).
+ * 404 → null (already gone, not an error). 403 → PhoneburnerAccessError (same
+ * meaning as on the list endpoint: this member's API Access is off).
+ */
+export async function fetchPbContact(
+  contactId: string,
+  getToken: (force?: boolean) => Promise<string>,
+  opts?: PbCallOpts
+): Promise<PbContact | null> {
+  const res = await pbFetch(
+    `/contacts/${encodeURIComponent(contactId)}`,
+    getToken,
+    undefined,
+    opts?.throttle
+  );
+
+  if (res.status === 404) return null;
+  if (res.status === 403) {
+    throw new PhoneburnerAccessError(contactId, `PhoneBurner API access disabled (fetching contact ${contactId})`);
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`PhoneBurner /contacts/${contactId} failed: HTTP ${res.status} ${body.slice(0, 300)}`);
+  }
+
+  const json: any = await res.json();
+  const env = json?.contact ?? json?.contacts ?? json;
+  // The response may nest the record the same way list pages do (see
+  // flattenPbCollection) OR already be a bare contact object — flattenPbCollection
+  // handles both: it returns the value itself, unwrapped, when it already
+  // matches the leaf predicate (the bare-object case), otherwise it recurses
+  // to find the nested leaf.
+  const isContactLeaf = (o: any) =>
+    o &&
+    typeof o === "object" &&
+    (o.user_id !== undefined ||
+      o.primary_email !== undefined ||
+      o.emails !== undefined ||
+      o.primary_phone !== undefined ||
+      o.phones !== undefined);
+
+  const [rec] = flattenPbCollection(env, isContactLeaf);
+  if (!rec) return null;
+
+  const contact = normalizePbContact(rec);
+  return contact.id ? contact : null;
 }

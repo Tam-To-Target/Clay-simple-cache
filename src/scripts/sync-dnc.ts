@@ -50,15 +50,19 @@ async function main() {
   }
 
   const ok = sync.filter((r) => r.status === "ok");
+  const skippedUnchanged = sync.filter((r) => r.status === "skipped_unchanged");
   const errored = sync.filter((r) => r.status === "error");
   const totalEntries = ok.reduce((s, r) => s + r.entry_count, 0);
+  const totalAdded = ok.reduce((s, r) => s + (r.added ?? 0), 0);
+  const totalRemoved = ok.reduce((s, r) => s + (r.removed ?? 0), 0);
   const discoverErrors = discover.filter((d) => d.status === "error");
   // Clients/sources whose HubSpot access is gone — expected operational events,
   // reported as warnings but NOT counted as failures.
   const noAccess = discover.filter((d) => d.status === "no_access");
 
   console.log(
-    `DNC sync complete: ${sync.length} source(s), ${ok.length} ok, ${errored.length} error(s), ` +
+    `DNC sync complete: ${sync.length} source(s), ${ok.length} ok (+${totalAdded}/-${totalRemoved}), ` +
+      `${skippedUnchanged.length} skipped-unchanged, ${errored.length} error(s), ` +
       `${noAccess.length} no-access, ${totalEntries} entries.`
   );
 
@@ -69,10 +73,20 @@ async function main() {
     }
   }
   for (const r of sync) {
-    const tag = r.status === "ok" ? "✓" : r.status === "skipped" ? "–" : r.status === "no_access" ? "⊘" : "✗";
+    const tag =
+      r.status === "ok"
+        ? "✓"
+        : r.status === "skipped_unchanged"
+          ? "↻"
+          : r.status === "skipped"
+            ? "–"
+            : r.status === "no_access"
+              ? "⊘"
+              : "✗";
+    const diffSuffix = r.status === "ok" ? ` (+${r.added ?? 0}/-${r.removed ?? 0})` : "";
     console.log(
       `  ${tag} [${r.client_external_id}] list ${r.hubspot_list_id ?? "-"} [${r.level}] (${r.label ?? "no label"}): ` +
-        `${r.entry_count} entries${r.error ? ` — ${r.error}` : ""}`
+        `${r.entry_count} entries${diffSuffix}${r.error ? ` — ${r.error}` : ""}`
     );
   }
 

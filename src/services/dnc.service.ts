@@ -71,6 +71,27 @@ export function normalizeEntry(raw: RawDncEntry): NormalizedDncEntry | null {
   };
 }
 
+/** Result of a diff-based source sync. `count` is the resulting total for the source. */
+export interface DiffSyncResult {
+  count: number;
+  added: number;
+  removed: number;
+  changed: boolean;
+}
+
+/**
+ * Identity key used to diff a source's existing rows against a freshly-fetched
+ * entry set. Two entries are "the same row" iff every identifier matches
+ * (null/empty normalized identically on both sides).
+ */
+function entryIdentityKey(e: {
+  email?: string | null;
+  phone_e164?: string | null;
+  domain?: string | null;
+}): string {
+  return `${e.email ?? ""}|${e.phone_e164 ?? ""}|${e.domain ?? ""}`;
+}
+
 export const dncService = {
   /**
    * Find the first DNC entry for a client matching ANY of the provided
@@ -118,16 +139,52 @@ export const dncService = {
   },
 
   /**
-   * Replace ALL entries belonging to a source with a fresh set (full snapshot).
-   * Used by HubSpot sync and CSV "replace" imports. Atomic per source.
+   * Reconcile a source's entries with a freshly-fetched set BY DIFF instead of
+   * wholesale replace: only rows whose identity key (email|phone|domain) is
+   * genuinely new are inserted, only rows whose key vanished are deleted, and
+   * everything else is left untouched — including its `created_at`. That
+   * timestamp is the whole point: with a full delete+reinsert every row's
+   * `created_at` resets on every sync, so it can never be used as a "have we
+   * already processed this entry" watermark (see PhoneburnerMember.dnc_processed_through).
+   * With diff-based writes, `created_at` only moves for rows that actually changed.
    */
-  async replaceSourceEntries(
+  async diffSourceEntries(
     clientId: string,
     sourceId: string,
     sourceType: DncSourceType,
     entries: NormalizedDncEntry[]
-  ): Promise<number> {
-    const rows = entries.map((e) => ({
+  ): Promise<DiffSyncResult> {
+    const existing = await prisma.dncEntry.findMany({
+      where: { source_id: sourceId },
+      select: { id: true, email: true, phone_e164: true, domain: true },
+    });
+
+    // First-wins de-dup on both sides: existing rows shouldn't collide (the
+    // identity columns are effectively unique per source), but incoming
+    // entries can (e.g. the same person appears twice in a HubSpot list page).
+    const existingByKey = new Map<string, { id: string }>();
+    for (const row of existing) {
+      const key = entryIdentityKey(row);
+      if (!existingByKey.has(key)) existingByKey.set(key, { id: row.id });
+    }
+
+    const incomingByKey = new Map<string, NormalizedDncEntry>();
+    for (const e of entries) {
+      const key = entryIdentityKey(e);
+      if (!incomingByKey.has(key)) incomingByKey.set(key, e);
+    }
+
+    const toInsert: NormalizedDncEntry[] = [];
+    for (const [key, e] of incomingByKey) {
+      if (!existingByKey.has(key)) toInsert.push(e);
+    }
+
+    const toDeleteIds: string[] = [];
+    for (const [key, row] of existingByKey) {
+      if (!incomingByKey.has(key)) toDeleteIds.push(row.id);
+    }
+
+    const insertRows = toInsert.map((e) => ({
       client_id: clientId,
       source_id: sourceId,
       source_type: sourceType,
@@ -138,14 +195,52 @@ export const dncService = {
       data: e.data as Prisma.InputJsonValue,
     }));
 
-    await prisma.$transaction([
-      prisma.dncEntry.deleteMany({ where: { source_id: sourceId } }),
-      ...(rows.length > 0
-        ? [prisma.dncEntry.createMany({ data: rows })]
-        : []),
-    ]);
+    // Chunk deletes — Postgres/Prisma `IN` lists get unwieldy past ~1000 ids.
+    const deleteIdChunks: string[][] = [];
+    for (let i = 0; i < toDeleteIds.length; i += 1000) {
+      deleteIdChunks.push(toDeleteIds.slice(i, i + 1000));
+    }
 
-    return rows.length;
+    const ops: Prisma.PrismaPromise<any>[] = [
+      ...deleteIdChunks.map((chunk) => prisma.dncEntry.deleteMany({ where: { id: { in: chunk } } })),
+      ...(insertRows.length > 0 ? [prisma.dncEntry.createMany({ data: insertRows })] : []),
+    ];
+
+    if (ops.length > 0) {
+      await prisma.$transaction(ops);
+    }
+
+    const added = toInsert.length;
+    const removed = toDeleteIds.length;
+    const changed = added > 0 || removed > 0;
+
+    if (changed) {
+      await prisma.client.update({
+        where: { id: clientId },
+        data: { dnc_changed_at: new Date() },
+      });
+    }
+
+    return { count: incomingByKey.size, added, removed, changed };
+  },
+
+  /**
+   * Replace ALL entries belonging to a source with a fresh set (full snapshot).
+   * Used by HubSpot sync and CSV "replace" imports.
+   *
+   * Implemented as a thin delegate to `diffSourceEntries` — the external
+   * contract (returns the resulting count) is unchanged, but it's no longer
+   * destructive to rows that are still present in the new set: their
+   * `created_at` survives instead of being reset by a delete+reinsert.
+   */
+  async replaceSourceEntries(
+    clientId: string,
+    sourceId: string,
+    sourceType: DncSourceType,
+    entries: NormalizedDncEntry[]
+  ): Promise<number> {
+    const result = await this.diffSourceEntries(clientId, sourceId, sourceType, entries);
+    return result.count;
   },
 
   /** Append entries to a source without clearing existing ones. */

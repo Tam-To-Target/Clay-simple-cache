@@ -92,6 +92,11 @@ model Client {
   hubspot_access_token String?
   created_at           DateTime @default(now()) @db.Timestamptz(6)
   updated_at           DateTime @updatedAt @db.Timestamptz(6)
+  // Bumped whenever a diff sync actually adds or removes dnc_entries for this
+  // client (unchanged rows don't touch it). Lets the purge/detector side tell
+  // "something changed" apart from "we ran the sync job" — see dnc.service's
+  // diffSourceEntries and the DNC pipeline optimization plan.
+  dnc_changed_at       DateTime? @db.Timestamptz(6)
 
   dnc_sources         DncSource[]
   dnc_entries         DncEntry[]
@@ -178,6 +183,14 @@ model DncSource {
   last_sync_status String?   // 'ok' | 'error'
   last_sync_error  String?
   last_entry_count Int       @default(0)
+  // hs_list_size observed at the last successful sync — compared against a
+  // cheap re-fetch to skip a full membership pull when nothing changed.
+  last_list_size    Int?
+  // Last time membership was FULLY re-read (every member batch-read), as
+  // opposed to reconstructed from the known-contact cache. Forces a full
+  // re-pull past DNC_FULL_REFRESH_HOURS even when the list size looks stable
+  // (catches same-size swaps).
+  last_full_sync_at DateTime? @db.Timestamptz(6)
   created_at       DateTime  @default(now()) @db.Timestamptz(6)
   updated_at       DateTime  @updatedAt @db.Timestamptz(6)
 
@@ -232,12 +245,40 @@ model PhoneburnerMember {
   active        Boolean   @default(true) // false = stop scrubbing (left team / API off)
   api_access_ok Boolean   @default(false) // last run saw a working token (else 403)
   last_run_at   DateTime? @db.Timestamptz(6)
+  // Last time this member's book got a FULL scan (rebuilds the identity index
+  // below). Older than PB_FULL_SCAN_MAX_AGE_HOURS ⇒ due for another full scan;
+  // otherwise targeted purge mode reuses the index instead of re-scanning.
+  last_full_scan_at     DateTime? @db.Timestamptz(6)
+  // Watermark: every dnc_entry of this client with created_at <= this has
+  // already been collided against this member's book. Diff-based sync (see
+  // dnc.service.diffSourceEntries) preserves created_at on unchanged rows, so
+  // "new entries since last purge" = created_at > dnc_processed_through.
+  dnc_processed_through DateTime? @db.Timestamptz(6)
   created_at    DateTime  @default(now()) @db.Timestamptz(6)
   updated_at    DateTime  @updatedAt @db.Timestamptz(6)
 
   @@unique([client_id, pb_member_id])
   @@index([client_id])
   @@map("phoneburner_members")
+}
+
+// Identity index of each PhoneBurner member's book, rebuilt as a byproduct of every full scan.
+// One row per (member, contact, identifier). Lets NEW DNC entries be deleted with a targeted
+// per-id DELETE instead of a full book re-scan (PB has no search API — see plan doc §3).
+model PhoneburnerContactIndex {
+  id            String   @id @default(uuid()) @db.Uuid
+  pb_member_id  String
+  pb_contact_id String
+  email         String?  // normalized (lowercase)
+  phone_e164    String?
+  domain        String?  // corporate email domain, free/disposable-filtered
+  last_seen_at  DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([pb_member_id, email])
+  @@index([pb_member_id, phone_e164])
+  @@index([pb_member_id, domain])
+  @@index([pb_member_id, pb_contact_id])
+  @@map("phoneburner_contact_index")
 }
 
 // Audit + backup of every deletion. `snapshot` holds the full PB contact JSON so

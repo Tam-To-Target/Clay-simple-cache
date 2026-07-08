@@ -3,6 +3,7 @@ import {
   normalizePbContact,
   fetchMemberContacts,
   deletePbContact,
+  fetchPbContact,
   PhoneburnerAccessError,
 } from "../../src/services/phoneburner.service";
 import { flattenPbCollection } from "../../src/services/phoneburner-token.service";
@@ -135,6 +136,16 @@ describe("fetchMemberContacts", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonRes(400, "bad request")));
     await expect(fetchMemberContacts("m3", getToken)).rejects.toThrow(/HTTP 400/);
   });
+
+  it("uses the throttle override (per-member keyed throttle) when provided", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonRes(200, { contacts: { total_pages: 1, page: 1, contacts: [] } }))
+    );
+    const throttle = vi.fn().mockResolvedValue(undefined);
+    await fetchMemberContacts("m1", getToken, undefined, { throttle });
+    expect(throttle).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("deletePbContact", () => {
@@ -159,5 +170,74 @@ describe("deletePbContact", () => {
     const r = await deletePbContact("99", getToken);
     expect(r.ok).toBe(false);
     expect(r.status).toBe(400);
+  });
+
+  it("uses the throttle override when provided instead of the module default", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonRes(204, "")));
+    const throttle = vi.fn().mockResolvedValue(undefined);
+    await deletePbContact("99", getToken, { throttle });
+    expect(throttle).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("fetchPbContact", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("returns null on 404 (already gone)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonRes(404, "")));
+    const c = await fetchPbContact("42", getToken);
+    expect(c).toBeNull();
+  });
+
+  it("throws PhoneburnerAccessError on 403", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonRes(403, "API Access not enabled")));
+    await expect(fetchPbContact("42", getToken)).rejects.toBeInstanceOf(PhoneburnerAccessError);
+  });
+
+  it("throws a generic error on other failures", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonRes(400, "bad request")));
+    await expect(fetchPbContact("42", getToken)).rejects.toThrow(/HTTP 400/);
+  });
+
+  it("parses a nested single-contact response shape ({ contact: { ... } })", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonRes(200, { contact: { user_id: 42, primary_email: "a@corp.com" } }))
+    );
+    const c = await fetchPbContact("42", getToken);
+    expect(c?.id).toBe("42");
+    expect(c?.emails).toContain("a@corp.com");
+  });
+
+  it("parses PhoneBurner's index-keyed-map nesting under `contacts`", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonRes(200, { contacts: [{ "0": { user_id: 7, primary_email: "b@corp.com" } }] })
+      )
+    );
+    const c = await fetchPbContact("7", getToken);
+    expect(c?.id).toBe("7");
+    expect(c?.emails).toContain("b@corp.com");
+  });
+
+  it("handles a bare contact object with no wrapper", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonRes(200, { user_id: 9, primary_email: "c@corp.com" })));
+    const c = await fetchPbContact("9", getToken);
+    expect(c?.id).toBe("9");
+    expect(c?.emails).toContain("c@corp.com");
+  });
+
+  it("returns null when the response has no recognizable contact record", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonRes(200, { unrelated: true })));
+    const c = await fetchPbContact("9", getToken);
+    expect(c).toBeNull();
+  });
+
+  it("uses the throttle override when provided", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonRes(200, { user_id: 1 })));
+    const throttle = vi.fn().mockResolvedValue(undefined);
+    await fetchPbContact("1", getToken, { throttle });
+    expect(throttle).toHaveBeenCalledTimes(1);
   });
 });

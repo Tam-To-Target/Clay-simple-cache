@@ -122,43 +122,98 @@ clients ──< dnc_sources ──< dnc_entries
 - **CSV** → `POST /admin/dnc/import` (headers auto-detected; re-importing the same `source_label` replaces that source's entries).
 - **HubSpot lists** → register with `POST /admin/dnc/sources`, then sync. Each sync pulls the list's **current** membership (works for dynamic/active lists) and replaces that source's entries as a full snapshot.
 
-### Daily HubSpot sync (cron)
+### Daily ops (cron): sync + purge in one job
 
-The sync is exposed two ways — wire **one** to a daily scheduler:
+**`npm run ops:daily` is the recommended single Railway cron** for DNC/PhoneBurner
+ops — it replaces separately scheduling `dnc:sync` and `pb:purge`. Each run:
+
+1. **Sync** (`discoverAndSyncAll`) — re-discovers each client's HubSpot DNC
+   lists and refreshes membership, but **skips the HubSpot pull entirely** for
+   any list whose `hs_list_size` hasn't moved since last time (most lists,
+   most days). Cache writes are diff-based (insert what's new, delete what's
+   gone, leave unchanged rows alone), so `created_at` on an untouched row
+   stays meaningful — it's the watermark the purge phase uses.
+2. **Purge** (`runPurge`, `mode: "auto"`) — for each PhoneBurner member, either
+   a cheap **targeted delete** (look up only the DNC entries added since that
+   member's last full scan in a persistent identity index, then delete by id —
+   ~1 API call per hit, no book scan) or a **full reconciliation scan** of the
+   member's whole book when one is due (`PB_FULL_SCAN_MAX_AGE_HOURS`, default
+   weekly) — which also rebuilds the identity index for next time.
 
 ```bash
-# CLI (Railway cron, GitHub Actions, etc.)
+npm run ops:daily                    # all active clients
+npm run ops:daily -- cust_123        # a single client
+npm run ops:daily -- --full          # force a full HubSpot re-pull + full PB book scans everywhere
+npm run ops:daily -- --dry-run       # force purge dry-run (overrides PB_PURGE_DRY_RUN)
+npm run ops:daily -- --execute       # force purge live deletes (overrides PB_PURGE_DRY_RUN)
+```
+
+Example Railway cron (daily at 03:00 UTC): schedule the command `npm run ops:daily`.
+Needs the union of both phases' env: `DATABASE_URL`, `HUBSPOT_PROVISIONER_URL` /
+`HUBSPOT_PROVISIONER_API_SECRET` (sync), `SDR_LAUNCH_INTERNAL_URL` /
+`SDR_LAUNCH_INTERNAL_SECRET` (purge — member tokens come from GTMOS, not a PB
+admin token) — the script asserts all of them up front and fails fast with a
+clear message if any are missing (a Railway cron service does **not** inherit
+the web service's variables). **Dry-run by default** — set `PB_PURGE_DRY_RUN=false`
+(or pass `--execute`) only after validating dry-run output. Every deletion is
+snapshotted to `phoneburner_deletions` first. See `PHONEBURNER_DNC_PURGE_PLAN.md`.
+
+Run `npm run pb:bootstrap` once (after `clients:generate`) to map clients to
+PhoneBurner members before the first purge.
+
+### Hourly in-process detector (optional, on the web service)
+
+Between daily runs, DNC lists can still drift. Set `DETECTOR_ENABLED=true` on
+the **web service** (not the cron) to run a lightweight in-process check every
+`DETECTOR_INTERVAL_MINUTES` (default 60, first tick 2 minutes after boot):
+`detectAndSyncChangedClients()` spends about one HubSpot call per client to see
+if anything moved (near-zero cost when nothing did — only the list(s) that
+actually changed get a real membership pull), followed by a **targeted**
+`runPurge` pass, which is DB-only when there's nothing new to delete. A tick
+never throws out of the scheduler and an overlapping/hung tick simply delays
+the next one — see `src/scheduler.ts`.
+
+```
+DETECTOR_ENABLED=true
+DETECTOR_INTERVAL_MINUTES=60   # optional, default 60
+```
+
+This is additive to, not a replacement for, `ops:daily` — the detector keeps
+things fresh hour-to-hour; the daily cron is still what runs the periodic full
+PB book-scan reconciliation.
+
+### New env vars (all optional, sane defaults)
+
+| Var | Default | What it controls |
+| --- | --- | --- |
+| `DNC_SYNC_CONCURRENCY` | `4` | Clients synced in parallel per `ops:daily`/`dnc:sync` run. |
+| `DNC_FULL_REFRESH_HOURS` | `168` (weekly) | Max age of a HubSpot source's last full membership pull before a size-unchanged result is no longer trusted (catches a same-size list swap) and a real re-pull is forced. |
+| `PB_PURGE_CONCURRENCY` | `3` | PhoneBurner members purged in parallel per run. |
+| `PB_FULL_SCAN_MAX_AGE_HOURS` | `168` (weekly) | Max age of a member's last full book scan before `auto` mode runs a full scan instead of a targeted delete. |
+| `DETECTOR_ENABLED` | `false` | Turns on the hourly in-process detector (web service only). |
+| `DETECTOR_INTERVAL_MINUTES` | `60` | Detector tick interval. |
+
+### Granular entrypoints (still available)
+
+`dnc:sync` and `pb:purge` remain as independent scripts for a one-off,
+single-phase re-run (e.g. re-syncing HubSpot without touching PhoneBurner).
+`ops:daily` calls the same underlying services and is the recommended default
+for scheduled runs.
+
+```bash
+# HubSpot DNC sync only
 npm run dnc:sync                 # all active clients
 npm run dnc:sync -- cust_123     # a single client
-
 # or HTTP (any external/platform cron)
 curl -X POST http://localhost:3000/admin/dnc/sync \
   -H "Authorization: Bearer your_api_key" -H "Content-Type: application/json" -d '{}'
-```
 
-Example Railway cron (daily at 03:00 UTC): schedule the command `npm run dnc:sync`.
-
-> Sync is intentionally **not** an in-process timer, so it runs once regardless of how many app instances are deployed. HubSpot credentials live per-client in the DB, so no app-wide HubSpot env var is needed.
-
-### Daily PhoneBurner DNC purge (cron)
-
-Runs **after** `dnc:sync` (needs a fresh DNC cache). Deletes DNC-colliding
-contacts from each client's PhoneBurner members' books. **Dry-run by default** —
-set `PB_PURGE_DRY_RUN=false` (or pass `--execute`) only after validating dry-run
-output. See `PHONEBURNER_DNC_PURGE_PLAN.md`.
-
-```bash
-# one-time: map clients -> PhoneBurner members (after clients:generate)
-npm run pb:bootstrap
-
-# daily, sequential after the DNC sync:
-npm run dnc:sync && npm run pb:purge          # dry-run unless PB_PURGE_DRY_RUN=false
+# PhoneBurner purge only (needs a fresh DNC cache — run dnc:sync first)
+npm run pb:purge                              # all eligible clients, mode=auto
 npm run pb:purge -- cust_123 --dry-run        # one client, force dry-run
+npm run pb:purge -- --mode=targeted           # index-only, no full book scans
+npm run pb:purge -- --mode=full               # force a full book scan + index rebuild
 ```
-
-Needs `PHONEBURNER_ADMIN_TOKEN` (resolves every member token at runtime; tokens
-are never stored). Each member must have PhoneBurner "API Access" enabled, else
-it's skipped. Every deletion is snapshotted to `phoneburner_deletions` first.
 
 ## Testing Normalization
 Run the verification scripts:

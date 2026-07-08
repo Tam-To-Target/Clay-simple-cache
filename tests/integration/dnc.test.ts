@@ -7,9 +7,11 @@ vi.mock("../../src/db/prisma", () => ({
       findUnique: vi.fn(),
       findMany: vi.fn(),
       upsert: vi.fn(),
+      update: vi.fn().mockResolvedValue({}),
     },
     dncEntry: {
       findFirst: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
       deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
       createMany: vi.fn().mockResolvedValue({ count: 0 }),
     },
@@ -43,9 +45,11 @@ describe("DNC API", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockPrisma.dncEntry.findMany.mockResolvedValue([]);
     mockPrisma.dncEntry.deleteMany.mockResolvedValue({ count: 0 });
     mockPrisma.dncEntry.createMany.mockResolvedValue({ count: 0 });
     mockPrisma.dncSource.update.mockResolvedValue({});
+    mockPrisma.client.update.mockResolvedValue({});
     mockPrisma.$transaction.mockImplementation((ops: Promise<unknown>[]) => Promise.all(ops));
   });
 

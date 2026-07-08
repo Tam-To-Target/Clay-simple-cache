@@ -14,8 +14,15 @@
 import { createThrottle, withRetry } from "./http-retry";
 
 const HUBSPOT_BASE = "https://api.hubapi.com";
-const MEMBERSHIP_PAGE_SIZE = 100;
+// The v3 memberships endpoint accepts limit <= 250; using the max halves the
+// number of paging calls on large lists vs. the old 100.
+const MEMBERSHIP_PAGE_SIZE = 250;
 const BATCH_READ_SIZE = 100;
+
+/** Optional per-call throttle override — see {@link createKeyedThrottle} in http-retry. */
+export interface HsCallOpts {
+  throttle?: () => Promise<void>;
+}
 
 export interface HubspotListContact {
   hubspot_id: string;
@@ -32,6 +39,8 @@ export interface DncListInfo {
   name: string;
   /** null = name matched the prefix but had no recognized (Individual)/(Domain) suffix. */
   level: DncLevel | null;
+  /** Current membership size (HubSpot's hs_list_size), or null if unavailable. */
+  contact_count: number | null;
 }
 
 interface ListSearchResponse {
@@ -57,12 +66,18 @@ export function classifyDncList(name: string): DncLevel | null {
  */
 export async function searchDncLists(
   tokenProvider: TokenProvider,
-  prefix: string
+  prefix: string,
+  opts?: HsCallOpts
 ): Promise<DncListInfo[]> {
-  const res = await hsFetch(`/crm/v3/lists/search`, tokenProvider, {
-    method: "POST",
-    body: JSON.stringify({ query: prefix, count: 100 }),
-  });
+  const res = await hsFetch(
+    `/crm/v3/lists/search`,
+    tokenProvider,
+    {
+      method: "POST",
+      body: JSON.stringify({ query: prefix, count: 100 }),
+    },
+    opts?.throttle
+  );
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`HubSpot list search failed: HTTP ${res.status} ${body}`);
@@ -79,6 +94,8 @@ export async function searchDncLists(
       listId: String(l.listId),
       name: l.name as string,
       level: classifyDncList(l.name),
+      contact_count:
+        l.additionalProperties?.hs_list_size != null ? Number(l.additionalProperties.hs_list_size) : null,
     }));
 }
 
@@ -89,9 +106,10 @@ export async function searchDncLists(
  */
 export async function fetchListById(
   tokenProvider: TokenProvider,
-  listId: string
+  listId: string,
+  opts?: HsCallOpts
 ): Promise<{ listId: string; name: string } | null> {
-  const res = await hsFetch(`/crm/v3/lists/${encodeURIComponent(listId)}`, tokenProvider);
+  const res = await hsFetch(`/crm/v3/lists/${encodeURIComponent(listId)}`, tokenProvider, undefined, opts?.throttle);
   if (res.status === 404) return null;
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -101,6 +119,35 @@ export async function fetchListById(
   const l = json.list ?? json;
   if (!l || typeof l.name !== "string") return null;
   return { listId: String(l.listId ?? listId), name: l.name };
+}
+
+/**
+ * Cheap size check for change detection: fetches only `hs_list_size` instead
+ * of paging memberships. Never throws — a missing/404/unparseable size
+ * returns null, which callers treat as "must do a full sync" (safe default).
+ */
+export async function fetchListSize(
+  tokenProvider: TokenProvider,
+  listId: string,
+  opts?: HsCallOpts
+): Promise<number | null> {
+  try {
+    const res = await hsFetch(
+      `/crm/v3/lists/${encodeURIComponent(listId)}?additionalPropertyNames=hs_list_size`,
+      tokenProvider,
+      undefined,
+      opts?.throttle
+    );
+    if (res.status === 404 || !res.ok) return null;
+    const json = (await res.json()) as { list?: any; additionalProperties?: any };
+    const l = json.list ?? json;
+    const raw = l?.additionalProperties?.hs_list_size;
+    if (raw == null) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface HubspotListSummary {
@@ -119,12 +166,18 @@ export interface HubspotListSummary {
 export async function searchLists(
   tokenProvider: TokenProvider,
   query = "",
-  count = 100
+  count = 100,
+  opts?: HsCallOpts
 ): Promise<HubspotListSummary[]> {
-  const res = await hsFetch(`/crm/v3/lists/search`, tokenProvider, {
-    method: "POST",
-    body: JSON.stringify({ query, count }),
-  });
+  const res = await hsFetch(
+    `/crm/v3/lists/search`,
+    tokenProvider,
+    {
+      method: "POST",
+      body: JSON.stringify({ query, count }),
+    },
+    opts?.throttle
+  );
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`HubSpot list search failed: HTTP ${res.status} ${body}`);
@@ -187,17 +240,22 @@ const throttle = createThrottle(MIN_REQUEST_SPACING_MS);
 async function hsFetch(
   path: string,
   tokenProvider: TokenProvider,
-  init?: RequestInit
+  init?: RequestInit,
+  throttleOverride?: () => Promise<void>
 ): Promise<Response> {
   return withRetry((token) => rawFetch(path, token, init), tokenProvider, {
-    throttle,
+    throttle: throttleOverride ?? throttle,
     maxRetries: MAX_RETRIES,
     maxTokenRefreshes: MAX_TOKEN_REFRESHES,
   });
 }
 
 /** Page through a list's memberships and return all contact record IDs. */
-async function fetchListMemberIds(tokenProvider: TokenProvider, listId: string): Promise<string[]> {
+async function fetchListMemberIds(
+  tokenProvider: TokenProvider,
+  listId: string,
+  opts?: HsCallOpts
+): Promise<string[]> {
   const ids: string[] = [];
   let after: string | undefined;
 
@@ -205,7 +263,12 @@ async function fetchListMemberIds(tokenProvider: TokenProvider, listId: string):
     const params = new URLSearchParams({ limit: String(MEMBERSHIP_PAGE_SIZE) });
     if (after) params.set("after", after);
 
-    const res = await hsFetch(`/crm/v3/lists/${listId}/memberships?${params}`, tokenProvider);
+    const res = await hsFetch(
+      `/crm/v3/lists/${listId}/memberships?${params}`,
+      tokenProvider,
+      undefined,
+      opts?.throttle
+    );
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(`HubSpot memberships failed (list ${listId}): HTTP ${res.status} ${body}`);
@@ -222,19 +285,25 @@ async function fetchListMemberIds(tokenProvider: TokenProvider, listId: string):
 /** Batch-read contacts to get email + phone for the given record IDs. */
 async function fetchContactProps(
   tokenProvider: TokenProvider,
-  ids: string[]
+  ids: string[],
+  opts?: HsCallOpts
 ): Promise<HubspotListContact[]> {
   const out: HubspotListContact[] = [];
 
   for (let i = 0; i < ids.length; i += BATCH_READ_SIZE) {
     const batch = ids.slice(i, i + BATCH_READ_SIZE);
-    const res = await hsFetch(`/crm/v3/objects/contacts/batch/read`, tokenProvider, {
-      method: "POST",
-      body: JSON.stringify({
-        properties: ["email", "phone", "hs_email_domain"],
-        inputs: batch.map((id) => ({ id })),
-      }),
-    });
+    const res = await hsFetch(
+      `/crm/v3/objects/contacts/batch/read`,
+      tokenProvider,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          properties: ["email", "phone", "hs_email_domain"],
+          inputs: batch.map((id) => ({ id })),
+        }),
+      },
+      opts?.throttle
+    );
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -255,12 +324,38 @@ async function fetchContactProps(
   return out;
 }
 
-/** Full snapshot of a HubSpot list's contacts (email + phone + email domain). */
+/**
+ * Full snapshot of a HubSpot list's contacts (email + phone + email domain).
+ *
+ * When `opts.known` is provided (a map of hubspot_id -> previously-fetched
+ * HubspotListContact, e.g. reconstructed from cached `dnc_entries`), member
+ * ids already present in it are reused as-is and only the NEW ids are
+ * batch-read — the incremental-sync path from the optimization spec. Without
+ * `known` (or on the first sync) this behaves exactly as before: every
+ * member id is batch-read. Membership ids are deduped before use.
+ */
 export async function fetchListContacts(
   tokenProvider: TokenProvider,
-  listId: string
+  listId: string,
+  opts?: HsCallOpts & { known?: Map<string, HubspotListContact> }
 ): Promise<HubspotListContact[]> {
-  const ids = await fetchListMemberIds(tokenProvider, listId);
+  const rawIds = await fetchListMemberIds(tokenProvider, listId, opts);
+  const ids = [...new Set(rawIds)];
   if (ids.length === 0) return [];
-  return fetchContactProps(tokenProvider, ids);
+
+  const known = opts?.known;
+  if (!known || known.size === 0) {
+    return fetchContactProps(tokenProvider, ids, opts);
+  }
+
+  const knownContacts: HubspotListContact[] = [];
+  const unknownIds: string[] = [];
+  for (const id of ids) {
+    const cached = known.get(id);
+    if (cached) knownContacts.push(cached);
+    else unknownIds.push(id);
+  }
+
+  const freshContacts = unknownIds.length > 0 ? await fetchContactProps(tokenProvider, unknownIds, opts) : [];
+  return [...knownContacts, ...freshContacts];
 }

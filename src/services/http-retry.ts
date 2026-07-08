@@ -21,6 +21,56 @@ export function createThrottle(spacingMs: number): () => Promise<void> {
   };
 }
 
+/**
+ * Lazily creates and memoizes one `createThrottle(spacingMs)` per key.
+ * HubSpot's rate limit is per-portal and PhoneBurner's is per-member-account,
+ * so a single process-wide throttle needlessly serializes independent
+ * accounts against each other. Callers key by portal id / pb_member_id to get
+ * per-account spacing while still sharing one throttle instance per key
+ * across calls (memoized, not recreated).
+ */
+export function createKeyedThrottle(spacingMs: number): (key: string) => () => Promise<void> {
+  const throttles = new Map<string, () => Promise<void>>();
+  return (key: string) => {
+    let t = throttles.get(key);
+    if (!t) {
+      t = createThrottle(spacingMs);
+      throttles.set(key, t);
+    }
+    return t;
+  };
+}
+
+/**
+ * Runs `fn` over `items` with at most `limit` concurrent in-flight calls,
+ * preserving result order (result[i] corresponds to items[i] regardless of
+ * completion order). `limit` is clamped to >= 1. If any `fn` call rejects,
+ * that error propagates out of `mapWithConcurrency` — callers that need to
+ * keep processing the rest of the batch on a per-item failure should wrap
+ * their own try/catch inside `fn`.
+ */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  const boundedLimit = Math.max(1, Math.floor(limit) || 1);
+  let next = 0;
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index], index);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(boundedLimit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 export interface RetryOptions {
   throttle: () => Promise<void>;
   /** Max retries for 429 / 5xx. */

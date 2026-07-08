@@ -4,10 +4,12 @@
  *
  * MUST run AFTER `npm run dnc:sync` (needs a fresh DNC cache).
  *
- *   npm run pb:purge                 # all eligible clients (dry-run unless PB_PURGE_DRY_RUN=false)
- *   npm run pb:purge -- <slug>       # a single client
- *   npm run pb:purge -- --dry-run    # force dry-run (compute + audit, no deletes)
- *   npm run pb:purge -- --execute    # force real deletes (overrides PB_PURGE_DRY_RUN)
+ *   npm run pb:purge                    # all eligible clients (dry-run unless PB_PURGE_DRY_RUN=false)
+ *   npm run pb:purge -- <slug>          # a single client
+ *   npm run pb:purge -- --dry-run       # force dry-run (compute + audit, no deletes)
+ *   npm run pb:purge -- --execute       # force real deletes (overrides PB_PURGE_DRY_RUN)
+ *   npm run pb:purge -- --mode=targeted # index-only, no full book scans (default: auto)
+ *   npm run pb:purge -- --mode=full     # force a full book scan + index rebuild for every member
  */
 import dotenv from "dotenv";
 dotenv.config();
@@ -32,15 +34,21 @@ async function main() {
   const args = process.argv.slice(2);
   const forceDry = args.includes("--dry-run");
   const forceExecute = args.includes("--execute");
+  const modeArg = args.find((a) => a.startsWith("--mode="))?.slice("--mode=".length);
+  const mode = modeArg === "full" || modeArg === "targeted" || modeArg === "auto" ? modeArg : undefined;
+  if (modeArg && !mode) {
+    throw new Error(`Invalid --mode="${modeArg}" — expected auto|full|targeted`);
+  }
   const slug = args.find((a) => !a.startsWith("--"));
 
   const opts = purgeOptionsFromEnv({
     dryRun: forceExecute ? false : forceDry ? true : undefined,
+    mode,
   });
 
   console.log(
     `Starting PhoneBurner purge — ${opts.dryRun ? "DRY-RUN (no deletes)" : "LIVE (deletes enabled)"}` +
-      `${slug ? ` for client "${slug}"` : ""}, maxRatio=${opts.maxRatio}, domains=${opts.includeDomains}` +
+      `${slug ? ` for client "${slug}"` : ""}, mode=${opts.mode}, maxRatio=${opts.maxRatio}, domains=${opts.includeDomains}` +
       `${opts.maxDeletesPerRun ? `, cap=${opts.maxDeletesPerRun}` : ""}…`
   );
 
@@ -49,7 +57,8 @@ async function main() {
 
   console.log(
     `\nPurge ${summary.status.toUpperCase()} (run ${summary.run_id}, ${summary.dry_run ? "dry-run" : "live"}): ` +
-      `${t.clients_processed} client(s), ${t.members_processed} member(s) processed, ` +
+      `${t.clients_processed} client(s), ${t.members_processed} member(s) processed ` +
+      `(${t.full_scan_members} full-scan, ${t.targeted_members} targeted), ` +
       `${t.members_skipped} skipped, ${t.contacts_scanned} scanned, ${t.collisions_found} collisions, ` +
       `${opts.dryRun ? `${t.deleted} would-delete` : `${t.deleted} deleted`}, ${t.failed} failed` +
       `${t.protected_other_client ? `, ${t.protected_other_client} kept (shared-book)` : ""}.`
@@ -67,9 +76,10 @@ async function main() {
         m.status === "aborted_ratio" ? "⛔" : "⊘";
       console.log(
         `  ${tag} [${c.client_external_id}] member ${m.pb_member_id}` +
-          `${m.pb_username ? ` (${m.pb_username})` : ""}: ${m.status} — ` +
+          `${m.pb_username ? ` (${m.pb_username})` : ""} [${m.mode ?? "-"}]: ${m.status} — ` +
           `${m.contacts_scanned} scanned, ${m.collisions} collisions, ${m.deleted} ${opts.dryRun ? "would-delete" : "deleted"}` +
-          `${m.failed ? `, ${m.failed} failed` : ""}${m.error ? ` — ${m.error}` : ""}`
+          `${m.failed ? `, ${m.failed} failed` : ""}${m.stale_index ? `, ${m.stale_index} stale-index` : ""}` +
+          `${m.error ? ` — ${m.error}` : ""}`
       );
     }
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { withRetry, createThrottle, sleep } from "../../src/services/http-retry";
+import { withRetry, createThrottle, createKeyedThrottle, mapWithConcurrency, sleep } from "../../src/services/http-retry";
 
 const res = (status: number, headers: Record<string, string> = {}) =>
   ({ status, headers: { get: (k: string) => headers[k.toLowerCase()] ?? null } } as unknown as Response);
@@ -117,5 +117,91 @@ describe("sleep", () => {
     await p;
     expect(done).toHaveBeenCalled();
     vi.useRealTimers();
+  });
+});
+
+describe("createKeyedThrottle", () => {
+  it("serializes callers sharing the same key", async () => {
+    vi.useFakeTimers();
+    const keyed = createKeyedThrottle(100);
+    const throttleA = keyed("portal-a");
+    const order: number[] = [];
+    const a = throttleA().then(() => order.push(1));
+    const b = throttleA().then(() => order.push(2));
+    await vi.runAllTimersAsync();
+    await Promise.all([a, b]);
+    expect(order).toEqual([1, 2]);
+    vi.useRealTimers();
+  });
+
+  it("memoizes one throttle instance per key (same key -> same function)", () => {
+    const keyed = createKeyedThrottle(50);
+    expect(keyed("x")).toBe(keyed("x"));
+    expect(keyed("x")).not.toBe(keyed("y"));
+  });
+
+  it("lets independent keys proceed without waiting on each other", async () => {
+    const keyed = createKeyedThrottle(1_000_000); // huge spacing — would hang if shared
+    const throttleA = keyed("a");
+    const throttleB = keyed("b");
+    // First call on each key resolves immediately regardless of spacing (only
+    // subsequent calls on the SAME key wait for the prior slot).
+    await Promise.race([
+      Promise.all([throttleA(), throttleB()]),
+      sleep(50).then(() => Promise.reject(new Error("timed out — keys are not independent"))),
+    ]);
+  });
+});
+
+describe("mapWithConcurrency", () => {
+  it("preserves result order regardless of completion order", async () => {
+    const items = [30, 10, 20];
+    const out = await mapWithConcurrency(items, 3, async (ms, i) => {
+      await sleep(ms);
+      return i;
+    });
+    expect(out).toEqual([0, 1, 2]);
+  });
+
+  it("bounds actual concurrency to the given limit", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const items = Array.from({ length: 10 }, (_, i) => i);
+    await mapWithConcurrency(items, 3, async (i) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await sleep(5);
+      inFlight--;
+      return i;
+    });
+    expect(maxInFlight).toBeLessThanOrEqual(3);
+    expect(maxInFlight).toBeGreaterThan(1);
+  });
+
+  it("clamps a limit < 1 up to 1 (fully sequential)", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    await mapWithConcurrency([1, 2, 3], 0, async (i) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await sleep(1);
+      inFlight--;
+      return i;
+    });
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("propagates a rejection from fn", async () => {
+    await expect(
+      mapWithConcurrency([1, 2, 3], 2, async (i) => {
+        if (i === 2) throw new Error("boom");
+        return i;
+      })
+    ).rejects.toThrow("boom");
+  });
+
+  it("returns an empty array for empty input", async () => {
+    const out = await mapWithConcurrency([], 5, async (i) => i);
+    expect(out).toEqual([]);
   });
 });

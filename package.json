@@ -15,6 +15,7 @@
     "dnc:sync": "ts-node src/scripts/sync-dnc.ts",
     "pb:bootstrap": "ts-node src/scripts/bootstrap-phoneburner.ts",
     "pb:purge": "ts-node src/scripts/purge-phoneburner.ts",
+    "ops:daily": "ts-node src/scripts/ops-daily.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
