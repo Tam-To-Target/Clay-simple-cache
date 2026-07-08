@@ -32,7 +32,10 @@ export interface SourceSyncResult {
 export interface DiscoverResult {
   client_external_id: string;
   portal_id: string | null;
-  status: "ok" | "error" | "no_access";
+  // 'skipped' = client has no HubSpot portal (e.g. onboarding not finished) —
+  // an expected long-lived state, NOT a failure; runs must not exit non-zero
+  // for it night after night.
+  status: "ok" | "error" | "no_access" | "skipped";
   sources_active: number;
   deactivated: { list_id: string | null; name: string | null }[];
   /** Lists that matched the prefix but had no Individual/Domain suffix — reported, not synced. */
@@ -393,7 +396,9 @@ export async function discoverClient(client: Client): Promise<DiscoverResult> {
   };
 
   if (!client.hubspot_portal_id) {
-    return { ...base, status: "error", error: "Client has no HubSpot portal id" };
+    // Expected state for a client whose portal isn't connected yet — skip,
+    // don't error (an error here made every nightly run exit 1 forever).
+    return { ...base, status: "skipped", error: "Client has no HubSpot portal id" };
   }
 
   let lists;
