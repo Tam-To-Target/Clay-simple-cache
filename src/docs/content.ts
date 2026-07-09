@@ -621,4 +621,68 @@ Access off), \`skipped_no_dnc\`, \`aborted_ratio\`, \`capped\`, \`error\`. In dr
 client, with \`suggestions\`), \`500\` (unexpected failure). Per-member problems
 (no token / API access off / ratio gate) never fail the request — they're
 reported per member.
+
+---
+
+## Fit Scoring (config-driven, multi-tenant)
+
+Scores a target account against a client's stored rubric and returns a 0-100
+final score plus a plain-English briefing.
+
+**Scoring is 100% deterministic.** The engine computes every subscore and the
+weighted final score in code. The AI writes the reasoning narrative ONLY — it
+never does math and never decides a score or recommendation. Each client's rubric
+is a validated JSON config in our DB; a single generic engine interprets it.
+Adding a client = one validated config row, zero deploys.
+
+### POST /score
+
+Score one target against a client's rubric.
+
+**Body**:
+\`\`\`json
+{
+  "client_id": "hilight",
+  "values": { "total_enrollment": 8200, "propensity_to_spend": 72,
+              "median_household_income": 68000, "enrollment_trend": "growing" },
+  "push_to_hubspot": false,
+  "hubspot_object_id": "12345",       // required only when push_to_hubspot:true
+  "hubspot_object_type": "contacts"   // optional, default "contacts"
+}
+\`\`\`
+
+**Response**:
+\`\`\`json
+{
+  "final_score": 83,
+  "config_version": 3,
+  "per_criterion": [
+    { "key": "total_enrollment", "value": 8200, "subscore": 90, "weight": 0.4, "missing": false }
+  ],
+  "recommendation": "Prioritize now",
+  "reasoning": "This large district ...",
+  "cached": false,
+  "pushed": false
+}
+\`\`\`
+
+- No config for \`client_id\` → \`404\`.
+- Required criterion keys absent from \`values\` → \`422\` with \`missing_keys\`. (A
+  key that is present but null/blank is scored with \`missing:true\`, not a 422 —
+  "data was missing, don't penalize fit".)
+- \`push_to_hubspot:true\` with \`hubspot_push\` not enabled/configured, or without
+  \`hubspot_object_id\` → \`422\`.
+- Results are cached by (client_id, config_version, hash of values) so identical
+  inputs never re-bill the model.
+
+### PUT /config/:client_id
+
+Create or update a client's rubric. **Validated before persisting** — an invalid
+config is never stored; you get a per-field \`errors\` list. On success,
+\`config_version\` increments (old scores keep their old version).
+
+### GET /config/:client_id
+
+Return the current config + resolved \`config_version\`. This is the endpoint the
+config-authoring agent reads to debug/test/propose edits. \`404\` if none.
 `;

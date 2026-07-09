@@ -16,6 +16,7 @@
     "pb:bootstrap": "ts-node src/scripts/bootstrap-phoneburner.ts",
     "pb:purge": "ts-node src/scripts/purge-phoneburner.ts",
     "ops:daily": "ts-node src/scripts/ops-daily.ts",
+    "smoke:scoring": "ts-node src/scripts/smoke-scoring.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

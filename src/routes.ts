@@ -6,6 +6,7 @@ import { dncController } from './controllers/dnc.controller';
 import { hubspotController } from './controllers/hubspot.controller';
 import { phoneburnerController } from './controllers/phoneburner.controller';
 import { contactsController } from './controllers/contacts.controller';
+import { scoringController } from './controllers/scoring.controller';
 
 import { docsController } from './controllers/docs.controller';
 import { authMiddleware } from './middleware/auth.middleware';
@@ -54,6 +55,13 @@ router.get('/clients/:slug/contacts', requireIdentity, contactsController.buildL
 
 // PhoneBurner DNC purge (delete DNC-colliding contacts from members' books)
 router.post('/admin/phoneburner/purge', authMiddleware, phoneburnerController.purge);
+
+// ── Config-driven fit scoring (multi-tenant) ────────────────────────────────
+// Deterministic scoring in the engine; AI writes reasoning text only. Config
+// lives in our DB (PUT validates before persisting + bumps config_version).
+router.post('/score', authMiddleware, scoringController.score);
+router.put('/config/:client_id', authMiddleware, scoringController.putConfig);
+router.get('/config/:client_id', authMiddleware, scoringController.getConfig);
 
 router.get('/docs/api', docsController.get);
 

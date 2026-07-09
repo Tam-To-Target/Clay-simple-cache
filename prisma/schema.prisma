@@ -7,6 +7,50 @@ datasource db {
   url       = env("DATABASE_URL")
 }
 
+// ─── Fit scoring (config-driven, multi-tenant) ──────────────
+// A client's current scoring rubric. `client_id` is the external handle passed
+// in API payloads (matches Client.external_id when the client also has a portal,
+// but a scoring-only client need not have a Client row). Scoring is 100%
+// deterministic in code — this document only supplies parameters (criteria,
+// weights, tiers) + the reasoning prompt. NEVER stores calculation logic.
+model ScoringConfig {
+  id             String   @id @default(uuid()) @db.Uuid
+  client_id      String   @unique
+  // Bumped on every successful PUT. Old score_results keep their old version so
+  // historical reasoning stays explainable even after the rubric changes.
+  config_version Int      @default(1)
+  // The full validated config document (criteria, reasoning, hubspot_push).
+  document       Json
+  created_at     DateTime @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([client_id])
+  @@map("scoring_configs")
+}
+
+// Every computed score, keyed by (client, config_version, hash of input values).
+// Doubles as the reasoning cache: identical inputs under the same config never
+// re-bill the model. Historical rows are never rewritten when the config bumps.
+model ScoreResult {
+  id             String   @id @default(uuid()) @db.Uuid
+  client_id      String
+  config_version Int
+  // sha256 of the canonicalized `values` object.
+  values_hash    String
+  final_score    Int
+  recommendation String?
+  reasoning      String?
+  // per_criterion breakdown: [{ key, value, subscore, weight, missing }].
+  per_criterion  Json     @default("[]")
+  pushed         Boolean  @default(false)
+  created_at     DateTime @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([client_id, config_version, values_hash])
+  @@index([client_id])
+  @@map("score_results")
+}
+
 model Profile {
   id            String   @id @default(uuid()) @db.Uuid
   email         String?  @unique

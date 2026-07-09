@@ -102,6 +102,32 @@ export async function upsertHubspotContact(
   throw new HubspotApiError(`HubSpot contact create failed: HTTP ${createRes.status} ${body}`, createRes.status);
 }
 
+/**
+ * PATCH arbitrary properties onto an existing object by id. Used by fit scoring
+ * to write the computed score + reasoning onto the record the caller names
+ * (default object type "contacts"; e.g. "companies" for account-level scoring).
+ * The record must already exist — scoring pushes onto a known target, it does
+ * not create records.
+ */
+export async function updateObjectProperties(
+  portalId: string,
+  objectType: string,
+  objectId: string,
+  properties: Record<string, any>
+): Promise<void> {
+  const res = await hsFetch(portalId, `/crm/v3/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ properties }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new HubspotApiError(
+      `Update ${objectType}/${objectId} failed: HTTP ${res.status} ${body}`,
+      res.status
+    );
+  }
+}
+
 /** Delete a contact by id (used for test cleanup). */
 export async function deleteHubspotContact(portalId: string, id: string): Promise<void> {
   const res = await hsFetch(portalId, `/crm/v3/objects/contacts/${id}`, { method: "DELETE" });

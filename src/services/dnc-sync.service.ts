@@ -555,7 +555,12 @@ export async function discoverAndSyncAll(
     // With clients running concurrently, callbacks may fire out of order —
     // `done` is a completion counter, not this client's position in `clients`.
     const entries = sync.filter((s) => s.status === "ok").reduce((n, s) => n + s.entry_count, 0);
-    onClient?.(done, total, client.external_id, entries, discover.error);
+    // A 'skipped' client (no portal yet) carries a reason in discover.error for
+    // debugging, but it is NOT a failure — don't surface it to the progress
+    // callback, or every nightly run logs it as an ERROR for onboarding-
+    // incomplete clients (the exact noise the 'skipped' status was meant to end).
+    const reportedError = discover.status === "skipped" ? undefined : discover.error;
+    onClient?.(done, total, client.external_id, entries, reportedError);
 
     return { discover, sync };
   });
