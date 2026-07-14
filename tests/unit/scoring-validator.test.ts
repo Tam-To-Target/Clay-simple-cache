@@ -101,6 +101,31 @@ describe("hubspot_push", () => {
     expect(r.valid).toBe(false);
     expect(paths(r)).toContain("hubspot_push.reasoning_field");
   });
+
+  it("accepts optional object_type + identity_fields", () => {
+    const c = base();
+    c.hubspot_push = {
+      enabled: true,
+      score_field: "lead_fit_score",
+      reasoning_field: "lead_fit_score_reasoning",
+      object_type: "companies",
+      identity_fields: { account_name: "name", account_domain: "domain", starbridge_id: "starbridge_id" },
+    };
+    expect(validateConfig(c).valid).toBe(true);
+  });
+
+  it("rejects an unknown identity key or non-string mapping", () => {
+    const c = base();
+    c.hubspot_push = {
+      enabled: true,
+      score_field: "s",
+      reasoning_field: "r",
+      identity_fields: { account_name: "name", bogus: "x" } as any,
+    };
+    const r = validateConfig(c);
+    expect(r.valid).toBe(false);
+    expect(paths(r)).toContain("hubspot_push.identity_fields.bogus");
+  });
 });
 
 describe("score bounds (0-100)", () => {

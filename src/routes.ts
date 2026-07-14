@@ -59,7 +59,10 @@ router.post('/admin/phoneburner/purge', authMiddleware, phoneburnerController.pu
 // ── Config-driven fit scoring (multi-tenant) ────────────────────────────────
 // Deterministic scoring in the engine; AI writes reasoning text only. Config
 // lives in our DB (PUT validates before persisting + bumps config_version).
-router.post('/score', authMiddleware, scoringController.score);
+// /fit-score is the canonical path (there will be other score types); /score is
+// kept as a temporary backward-compatible alias.
+router.post('/fit-score', authMiddleware, scoringController.fitScore);
+router.post('/score', authMiddleware, scoringController.fitScore);
 router.put('/config/:client_id', authMiddleware, scoringController.putConfig);
 router.get('/config/:client_id', authMiddleware, scoringController.getConfig);
 

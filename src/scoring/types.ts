@@ -75,10 +75,27 @@ export interface ReasoningConfig {
   recommendation_bands?: RecommendationBand[];
 }
 
+/**
+ * Maps the request's required account-identity properties to HubSpot property
+ * names. Omitted keys fall back to HubSpot defaults (see DEFAULT_IDENTITY_MAP):
+ * account_name → "name", account_domain → "domain", starbridge_id →
+ * "starbridge_id". These are written to the record on push and are our primary
+ * ID properties for locating it.
+ */
+export interface IdentityFieldMap {
+  account_name?: string;
+  account_domain?: string;
+  starbridge_id?: string;
+}
+
 export interface HubspotPushConfig {
   enabled: boolean;
   score_field?: string;
   reasoning_field?: string;
+  /** HubSpot object the score is written to. Default "companies" (districts). */
+  object_type?: string;
+  /** Per-client override of the identity → HubSpot property mapping. */
+  identity_fields?: IdentityFieldMap;
 }
 
 export interface ScoringConfigDoc {

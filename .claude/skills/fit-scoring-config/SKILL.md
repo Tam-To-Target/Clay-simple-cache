@@ -36,8 +36,21 @@ Auth: `Authorization: Bearer <API_KEY>` on every call.
   Success bumps `config_version`.
 - `GET /config/:client_id` — read the current config + resolved `config_version`.
   **Always read this first** when debugging or proposing an edit.
-- `POST /score` — score one target. Body `{ client_id, values, push_to_hubspot?,
-  hubspot_object_id?, hubspot_object_type? }`.
+- `POST /fit-score` — score one target (this is the fit score; other score types
+  will get their own paths). `/score` is a temporary backward-compatible alias.
+  Body `{ client_id, account_name, account_domain, starbridge_id, values,
+  reasoning?, push_to_hubspot?, hubspot_object_id?, hubspot_object_type? }`.
+
+**Required identity properties (outside `values`):** every `/fit-score` call must
+send `account_name`, `account_domain`, and `starbridge_id` — missing any → `422`
+with `missing_fields`. These are our primary HubSpot ID properties and are written
+to the record on push. They map to HubSpot property names via
+`hubspot_push.identity_fields` (defaults: `name` / `domain` / `starbridge_id`).
+
+**Reasoning toggle:** reasoning is ON by default (subject to `reasoning.enabled` in
+the config). Pass `"reasoning": false` on a call to skip the LLM (e.g. cheap bulk
+scoring) — the deterministic score is still returned. The flag can only suppress,
+never force reasoning on when the config disables it.
 
 ## Config document shape
 
@@ -180,18 +193,31 @@ the engine's. The prompt keeps only context + word rules + missing-data handling
 ## Enabling HubSpot push
 
 1. Pre-create the two HubSpot properties in the client's portal (a number field
-   for the score, a text/long-text field for the reasoning).
+   for the score, a text/long-text field for the reasoning). The identity target
+   properties (`name`, `domain`, `starbridge_id`) must also exist — `name`/`domain`
+   are Company defaults; `starbridge_id` is custom (assumed to exist).
 2. Set in config:
    ```json
-   "hubspot_push": { "enabled": true, "score_field": "lead_fit_score",
-                     "reasoning_field": "lead_fit_score_reasoning" }
+   "hubspot_push": {
+     "enabled": true,
+     "score_field": "lead_fit_score",
+     "reasoning_field": "lead_fit_score_reasoning",
+     "object_type": "companies",
+     "identity_fields": {
+       "account_name": "name",
+       "account_domain": "domain",
+       "starbridge_id": "starbridge_id"
+     }
+   }
    ```
-   The validator requires both field names when `enabled`.
+   The validator requires `score_field` + `reasoning_field` when `enabled`.
+   `object_type` (default `"companies"`) and `identity_fields` (defaults shown) are
+   optional — omit `identity_fields` to use the defaults.
 3. Per call, pass `"push_to_hubspot": true` and `"hubspot_object_id": "<id>"`
-   (the record to write onto) and optionally `"hubspot_object_type"` (default
-   `"contacts"`; use `"companies"` for account-level scoring). The score →
-   `score_field`, reasoning → `reasoning_field`. The API resolves the client's
-   HubSpot token server-side via the provisioner — **never pass a token**.
+   (the record to write onto). The score → `score_field`, reasoning →
+   `reasoning_field`, and the three identity props → their mapped HubSpot fields,
+   all PATCHed onto that record. The API resolves the client's HubSpot token
+   server-side via the provisioner — **never pass a token**.
 4. `422` if push is requested but `hubspot_push` isn't enabled/configured or
    `hubspot_object_id` is missing. The score is still computed and returned.
 

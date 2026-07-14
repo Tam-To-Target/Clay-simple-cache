@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { validateConfig } from "../scoring/validator";
 import { computeScore, hashValues, findMissingRequiredKeys } from "../scoring/engine";
+import { isBlank } from "../scoring/criteria";
 import { scoringConfigService } from "../services/scoring-config.service";
 import { scoringCacheService } from "../services/scoring-cache.service";
 import { generateReasoning } from "../services/reasoning.service";
@@ -9,10 +10,28 @@ import { updateObjectProperties, HubspotApiError } from "../services/hubspot-con
 import { HubspotAccessError } from "../services/hubspot-token.service";
 import type { ScoringConfigDoc } from "../scoring/types";
 
+/** Required account-identity properties on every /fit-score call (outside
+ *  `values`). They are our primary HubSpot ID properties and are written to the
+ *  record on push. */
+const REQUIRED_IDENTITY = ["account_name", "account_domain", "starbridge_id"] as const;
+type IdentityKey = (typeof REQUIRED_IDENTITY)[number];
+
+/** Fallback identity → HubSpot property mapping when a config doesn't override.
+ *  name/domain are HubSpot Company defaults; starbridge_id is custom but assumed
+ *  to exist on the portal. */
+const DEFAULT_IDENTITY_MAP: Record<IdentityKey, string> = {
+  account_name: "name",
+  account_domain: "domain",
+  starbridge_id: "starbridge_id",
+};
+
+/** Scored entities are districts → HubSpot Companies by default. */
+const DEFAULT_FIT_OBJECT_TYPE = "companies";
+
 /**
- * Config-driven fit scoring.
+ * Config-driven FIT scoring (one of several score types — hence /fit-score).
  *
- *   POST /score            — score one target against a client's rubric.
+ *   POST /fit-score         — score one target against a client's rubric.
  *   PUT  /config/:client_id — create/update a rubric (validate-before-persist).
  *   GET  /config/:client_id — read the current rubric (+ resolved version).
  *
@@ -21,11 +40,15 @@ import type { ScoringConfigDoc } from "../scoring/types";
  */
 export const scoringController = {
   /**
-   * POST /score
-   * Body: { client_id, values: {...}, push_to_hubspot?, hubspot_object_id?,
-   *         hubspot_object_type? }
+   * POST /fit-score
+   * Body: {
+   *   client_id, values: {...},
+   *   account_name, account_domain, starbridge_id,   // REQUIRED identity props
+   *   reasoning?: boolean,                            // default true; false = skip
+   *   push_to_hubspot?, hubspot_object_id?, hubspot_object_type?
+   * }
    */
-  async score(req: Request, res: Response): Promise<void> {
+  async fitScore(req: Request, res: Response): Promise<void> {
     try {
       const body = req.body || {};
       const { client_id, values, push_to_hubspot } = body;
@@ -38,6 +61,19 @@ export const scoringController = {
         res.status(400).json({ error: "values must be an object of { criterion_key: value }" });
         return;
       }
+
+      // Required account-identity properties (outside `values`). Missing any →
+      // 422; these are our HubSpot ID properties and get pushed to the record.
+      const identity: Record<IdentityKey, string> = {} as any;
+      const missingIdentity = REQUIRED_IDENTITY.filter((k) => isBlank(body[k]));
+      if (missingIdentity.length) {
+        res.status(422).json({
+          error: "Missing required account identity properties",
+          missing_fields: missingIdentity,
+        });
+        return;
+      }
+      for (const k of REQUIRED_IDENTITY) identity[k] = String(body[k]).trim();
 
       const stored = await scoringConfigService.get(client_id);
       if (!stored) {
@@ -59,13 +95,18 @@ export const scoringController = {
 
       const valuesHash = hashValues(values);
       const configVersion = stored.config_version;
-      const reasoningRequested = !!config.reasoning?.enabled;
+
+      // Reasoning is ON by default (subject to the config), but a caller can turn
+      // it OFF per-call with { "reasoning": false } — e.g. for cheap/fast bulk
+      // scoring. The flag can only suppress; it cannot force reasoning on when
+      // the config has it disabled.
+      const reasoningOff = body.reasoning === false || body.reasoning === "false";
+      const reasoningOn = !!config.reasoning?.enabled && !reasoningOff;
 
       // Validate push preconditions BEFORE computing/billing. A push that can't
       // happen (unconfigured, or no target record) must not waste a model call
       // and must not discard a score we already paid to compute — so we 422
-      // here, before any work. (Honors the spec's "push requested but not
-      // configured → 422" while never billing for a doomed request.)
+      // here, before any work.
       let pushTarget: PushTarget | null = null;
       if (push_to_hubspot === true) {
         const resolved = await resolvePushTarget(config, body, client_id);
@@ -77,10 +118,10 @@ export const scoringController = {
       }
 
       // ── Load any cached result. A cached row whose reasoning is still null
-      // while reasoning is enabled is a prior FAILED narrative — recompute just
-      // the reasoning (the deterministic score itself never changes). ─────────
+      // while reasoning is ON for THIS call is a prior failed/skipped narrative —
+      // recompute just the reasoning (the deterministic score never changes). ──
       const existing = await scoringCacheService.get(client_id, configVersion, valuesHash);
-      const needsReasoningRetry = reasoningRequested && existing != null && existing.reasoning == null;
+      const needsReasoningRetry = reasoningOn && existing != null && existing.reasoning == null;
       const fullHit = existing != null && !needsReasoningRetry;
 
       let finalScore: number;
@@ -100,20 +141,25 @@ export const scoringController = {
         perCriterion = engine.per_criterion;
         recommendation = engine.recommendation;
 
-        const r = await generateReasoning({
-          reasoning: config.reasoning || { enabled: false },
-          finalScore,
-          recommendation,
-          perCriterion,
-        });
-        reasoning = r.reasoning;
-        reasoningError = r.error;
+        if (reasoningOn) {
+          const r = await generateReasoning({
+            reasoning: config.reasoning || { enabled: false },
+            finalScore,
+            recommendation,
+            perCriterion,
+          });
+          reasoning = r.reasoning;
+          reasoningError = r.error;
+        } else {
+          // Reasoning turned off for this call — don't generate. Keep any prior
+          // narrative if one is already cached (free), else null.
+          reasoning = existing?.reasoning ?? null;
+        }
 
         // ALWAYS persist the deterministic result — it is the audit trail and
         // the value we may write to a customer's CRM, so it must never be lost
-        // just because the (regenerable) narrative failed. Reasoning may be null
-        // (disabled or a transient failure); a later identical call retries the
-        // reasoning only. Preserve a prior `pushed` flag across a retry.
+        // just because the (regenerable) narrative failed or was skipped.
+        // Preserve a prior `pushed` flag across a recompute.
         await scoringCacheService.put({
           clientId: client_id,
           configVersion,
@@ -130,7 +176,7 @@ export const scoringController = {
       let pushed = false;
       let pushError: string | undefined;
       if (pushTarget) {
-        const result = await executePush(pushTarget, finalScore, reasoning);
+        const result = await executePush(pushTarget, finalScore, reasoning, identity);
         if (result.status === "ok") {
           pushed = true;
           await scoringCacheService.markPushed(client_id, configVersion, valuesHash);
@@ -142,6 +188,7 @@ export const scoringController = {
       res.json({
         final_score: finalScore,
         config_version: configVersion,
+        account: identity,
         per_criterion: perCriterion,
         recommendation,
         reasoning,
@@ -212,15 +259,17 @@ interface PushTarget {
   objectId: string;
   scoreField: string;
   reasoningField: string;
+  /** Resolved identity → HubSpot property mapping (config override or defaults). */
+  identityMap: Record<IdentityKey, string>;
 }
 
 type ResolveResult = { ok: true; target: PushTarget } | { ok: false; error: string };
 
 /**
  * Resolve everything a push needs — WITHOUT touching HubSpot — so the caller can
- * 422 before we compute/bill a score. The target FIELDS come from the
- * pre-configured hubspot_push block; the target RECORD id comes per-call (values
- * carry metrics, not identity). Never accepts a token.
+ * 422 before we compute/bill a score. The target FIELDS + identity mapping come
+ * from the pre-configured hubspot_push block (or defaults); the target RECORD id
+ * comes per-call. Never accepts a token.
  */
 async function resolvePushTarget(
   config: ScoringConfigDoc,
@@ -247,30 +296,41 @@ async function resolvePushTarget(
   if (!client || !client.hubspot_portal_id) {
     return { ok: false, error: `Client ${clientId} has no connected HubSpot portal — cannot push.` };
   }
+  // Identity mapping: config override merged over the HubSpot-default map.
+  const cfgMap = push.identity_fields || {};
+  const identityMap: Record<IdentityKey, string> = {
+    account_name: cfgMap.account_name || DEFAULT_IDENTITY_MAP.account_name,
+    account_domain: cfgMap.account_domain || DEFAULT_IDENTITY_MAP.account_domain,
+    starbridge_id: cfgMap.starbridge_id || DEFAULT_IDENTITY_MAP.starbridge_id,
+  };
   return {
     ok: true,
     target: {
       portalId: client.hubspot_portal_id,
-      objectType: body.hubspot_object_type || "contacts",
+      objectType: body.hubspot_object_type || push.object_type || DEFAULT_FIT_OBJECT_TYPE,
       objectId: String(objectId),
       scoreField: push.score_field,
       reasoningField: push.reasoning_field,
+      identityMap,
     },
   };
 }
 
 type PushOutcome = { status: "ok" } | { status: "failed"; error: string };
 
-/** PATCH the score + reasoning onto the resolved record. */
+/** PATCH the score + reasoning + mapped account-identity props onto the record. */
 async function executePush(
   target: PushTarget,
   finalScore: number,
-  reasoning: string | null
+  reasoning: string | null,
+  identity: Record<IdentityKey, string>
 ): Promise<PushOutcome> {
   const properties: Record<string, any> = {
     [target.scoreField]: finalScore,
     [target.reasoningField]: reasoning ?? "",
   };
+  // Write our primary ID properties alongside the score (mapped per config).
+  for (const k of REQUIRED_IDENTITY) properties[target.identityMap[k]] = identity[k];
   try {
     await updateObjectProperties(target.portalId, target.objectType, target.objectId, properties);
     return { status: "ok" };

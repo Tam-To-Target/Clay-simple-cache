@@ -107,52 +107,76 @@ async function main() {
   const stillV2 = await request(app).get(`/config/${CLIENT}`).set(auth);
   check("rejected config was NOT stored (still v2)", stillV2.body?.config_version === 2, stillV2.body?.config_version);
 
-  console.log("POST /score (hand-computed = 83) ...");
+  // Required identity properties on every /fit-score call.
+  const ID = {
+    account_name: "Smoke District",
+    account_domain: "smoke.example.org",
+    starbridge_id: "SB-SMOKE-1",
+  };
+
+  console.log("POST /fit-score (hand-computed = 83) ...");
   const values = {
     total_enrollment: 8200,
     propensity_to_spend: 72,
     median_household_income: 68000,
     enrollment_trend: "growing",
   };
-  const score1 = await request(app).post(`/score`).set(auth).send({ client_id: CLIENT, values });
+  const score1 = await request(app).post(`/fit-score`).set(auth).send({ client_id: CLIENT, ...ID, values });
   check("score returns 200", score1.status === 200, score1.body);
   check("final_score is 83", score1.body?.final_score === 83, score1.body?.final_score);
   check("recommendation resolved", score1.body?.recommendation === "Prioritize now", score1.body?.recommendation);
   check("config_version is 2 (latest)", score1.body?.config_version === 2, score1.body?.config_version);
   check("cached:false on first score", score1.body?.cached === false, score1.body?.cached);
   check("per_criterion has 4 rows", score1.body?.per_criterion?.length === 4);
+  check("account echoed back", score1.body?.account?.starbridge_id === "SB-SMOKE-1", score1.body?.account);
 
-  console.log("POST /score again (cache hit) ...");
-  const score2 = await request(app).post(`/score`).set(auth).send({ client_id: CLIENT, values });
+  console.log("POST /fit-score again (cache hit) ...");
+  const score2 = await request(app).post(`/fit-score`).set(auth).send({ client_id: CLIENT, ...ID, values });
   check("cached:true on repeat", score2.body?.cached === true, score2.body?.cached);
   check("same final_score", score2.body?.final_score === 83, score2.body?.final_score);
 
-  console.log("POST /score missing required key (422) ...");
-  const score422 = await request(app)
-    .post(`/score`)
+  console.log("/score alias still works ...");
+  const alias = await request(app).post(`/score`).set(auth).send({ client_id: CLIENT, ...ID, values });
+  check("/score alias → 200, same score", alias.status === 200 && alias.body?.final_score === 83, alias.status);
+
+  console.log("POST /fit-score missing identity (422) ...");
+  const noId = await request(app).post(`/fit-score`).set(auth).send({ client_id: CLIENT, values });
+  check("missing identity → 422", noId.status === 422, noId.status);
+  check("lists missing_fields (3)", Array.isArray(noId.body?.missing_fields) && noId.body.missing_fields.length === 3, noId.body);
+
+  console.log("reasoning:false suppresses generation (still scores) ...");
+  const noReason = await request(app)
+    .post(`/fit-score`)
     .set(auth)
-    .send({ client_id: CLIENT, values: { total_enrollment: 8200 } });
+    .send({ client_id: CLIENT, ...ID, values: { ...values, total_enrollment: 400 }, reasoning: false });
+  check("reasoning:false → 200 with a score", noReason.status === 200 && typeof noReason.body?.final_score === "number", noReason.body);
+
+  console.log("POST /fit-score missing required criterion key (422) ...");
+  const score422 = await request(app)
+    .post(`/fit-score`)
+    .set(auth)
+    .send({ client_id: CLIENT, ...ID, values: { total_enrollment: 8200 } });
   check("returns 422", score422.status === 422, score422.status);
   check("lists missing_keys", Array.isArray(score422.body?.missing_keys) && score422.body.missing_keys.length === 3, score422.body);
 
-  console.log("POST /score present-but-null value (scored, flagged, no 422) ...");
+  console.log("POST /fit-score present-but-null value (scored, flagged, no 422) ...");
   const scoreNull = await request(app)
-    .post(`/score`)
+    .post(`/fit-score`)
     .set(auth)
-    .send({ client_id: CLIENT, values: { ...values, propensity_to_spend: null } });
+    .send({ client_id: CLIENT, ...ID, values: { ...values, propensity_to_spend: null } });
   check("null value → 200 (not 422)", scoreNull.status === 200, scoreNull.status);
   const propRow = scoreNull.body?.per_criterion?.find((c: any) => c.key === "propensity_to_spend");
   check("null value flagged missing", propRow?.missing === true, propRow);
 
-  console.log("POST /score unknown client (404) ...");
-  const s404 = await request(app).post(`/score`).set(auth).send({ client_id: "__nope__", values });
+  console.log("POST /fit-score unknown client (404) ...");
+  const s404 = await request(app).post(`/fit-score`).set(auth).send({ client_id: "__nope__", ...ID, values });
   check("unknown client → 404", s404.status === 404, s404.status);
 
   console.log("push_to_hubspot without config (422) ...");
   const pushBad = await request(app)
-    .post(`/score`)
+    .post(`/fit-score`)
     .set(auth)
-    .send({ client_id: CLIENT, values, push_to_hubspot: true, hubspot_object_id: "1" });
+    .send({ client_id: CLIENT, ...ID, values, push_to_hubspot: true, hubspot_object_id: "1" });
   check("push without hubspot_push config → 422", pushBad.status === 422, pushBad.status);
 
   console.log("auth rejection ...");

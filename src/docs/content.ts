@@ -635,27 +635,37 @@ never does math and never decides a score or recommendation. Each client's rubri
 is a validated JSON config in our DB; a single generic engine interprets it.
 Adding a client = one validated config row, zero deploys.
 
-### POST /score
+### POST /fit-score
 
-Score one target against a client's rubric.
+Score one target against a client's rubric. (\`/score\` is a temporary alias.)
 
 **Body**:
 \`\`\`json
 {
   "client_id": "hilight",
+  "account_name": "Burlingame Elementary School District",   // REQUIRED
+  "account_domain": "burlingame.k12.ca.us",                  // REQUIRED
+  "starbridge_id": "SB-123456",                              // REQUIRED
   "values": { "total_enrollment": 8200, "propensity_to_spend": 72,
               "median_household_income": 68000, "enrollment_trend": "growing" },
+  "reasoning": true,                  // optional, default true; false = skip the LLM
   "push_to_hubspot": false,
   "hubspot_object_id": "12345",       // required only when push_to_hubspot:true
-  "hubspot_object_type": "contacts"   // optional, default "contacts"
+  "hubspot_object_type": "companies"  // optional; default from config or "companies"
 }
 \`\`\`
+
+\`account_name\`, \`account_domain\`, and \`starbridge_id\` are REQUIRED identity
+properties (outside \`values\`). They are our primary HubSpot ID properties and are
+written to the record on push (mapped via config \`hubspot_push.identity_fields\`,
+default name/domain/starbridge_id).
 
 **Response**:
 \`\`\`json
 {
   "final_score": 83,
   "config_version": 3,
+  "account": { "account_name": "...", "account_domain": "...", "starbridge_id": "..." },
   "per_criterion": [
     { "key": "total_enrollment", "value": 8200, "subscore": 90, "weight": 0.4, "missing": false }
   ],
@@ -667,9 +677,12 @@ Score one target against a client's rubric.
 \`\`\`
 
 - No config for \`client_id\` → \`404\`.
+- Any of \`account_name\`/\`account_domain\`/\`starbridge_id\` missing → \`422\` with
+  \`missing_fields\`.
 - Required criterion keys absent from \`values\` → \`422\` with \`missing_keys\`. (A
   key that is present but null/blank is scored with \`missing:true\`, not a 422 —
   "data was missing, don't penalize fit".)
+- \`reasoning: false\` skips the LLM for that call (score still returned).
 - \`push_to_hubspot:true\` with \`hubspot_push\` not enabled/configured, or without
   \`hubspot_object_id\` → \`422\`.
 - Results are cached by (client_id, config_version, hash of values) so identical

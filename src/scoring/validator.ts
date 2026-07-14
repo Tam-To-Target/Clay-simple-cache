@@ -121,6 +121,25 @@ export function validateConfig(input: unknown): ValidationResult {
     if (!h.reasoning_field || !String(h.reasoning_field).trim()) {
       err("hubspot_push.reasoning_field", "reasoning_field required when hubspot_push.enabled");
     }
+    if (h.object_type !== undefined && (typeof h.object_type !== "string" || !h.object_type.trim())) {
+      err("hubspot_push.object_type", "object_type must be a non-empty string (e.g. \"companies\")");
+    }
+    // identity_fields is an optional { account_name?, account_domain?,
+    // starbridge_id? } → HubSpot-property map; unset keys use defaults.
+    if (h.identity_fields !== undefined) {
+      const idf = h.identity_fields as Record<string, unknown>;
+      if (typeof idf !== "object" || idf === null || Array.isArray(idf)) {
+        err("hubspot_push.identity_fields", "identity_fields must be an object mapping identity keys to HubSpot property names");
+      } else {
+        for (const [k, v] of Object.entries(idf)) {
+          if (!["account_name", "account_domain", "starbridge_id"].includes(k)) {
+            err(`hubspot_push.identity_fields.${k}`, "unknown identity key (allowed: account_name, account_domain, starbridge_id)");
+          } else if (typeof v !== "string" || !v.trim()) {
+            err(`hubspot_push.identity_fields.${k}`, "mapped HubSpot property name must be a non-empty string");
+          }
+        }
+      }
+    }
   }
 
   return { valid: errors.length === 0, errors };
