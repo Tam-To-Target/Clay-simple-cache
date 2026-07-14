@@ -6,8 +6,14 @@ import { scoringConfigService } from "../services/scoring-config.service";
 import { scoringCacheService } from "../services/scoring-cache.service";
 import { generateReasoning } from "../services/reasoning.service";
 import { clientService } from "../services/client.service";
-import { updateObjectProperties, HubspotApiError } from "../services/hubspot-contacts.service";
+import {
+  updateObjectProperties,
+  searchCompanyIdsByDomain,
+  createObject,
+  HubspotApiError,
+} from "../services/hubspot-contacts.service";
 import { HubspotAccessError } from "../services/hubspot-token.service";
+import { normalizeDomain } from "../services/normalization";
 import type { ScoringConfigDoc } from "../scoring/types";
 
 /** Required account-identity properties on every /fit-score call (outside
@@ -25,8 +31,8 @@ const DEFAULT_IDENTITY_MAP: Record<IdentityKey, string> = {
   starbridge_id: "starbridge_id",
 };
 
-/** Scored entities are districts → HubSpot Companies by default. */
-const DEFAULT_FIT_OBJECT_TYPE = "companies";
+/** Scored entities are always districts → HubSpot Companies. */
+const FIT_OBJECT_TYPE = "companies";
 
 /**
  * Config-driven FIT scoring (one of several score types — hence /fit-score).
@@ -74,6 +80,10 @@ export const scoringController = {
         return;
       }
       for (const k of REQUIRED_IDENTITY) identity[k] = String(body[k]).trim();
+      // Normalize the domain to a bare host (strip scheme/www/path/port) so it
+      // matches HubSpot's stored `domain` and dedupes across URL formats
+      // (e.g. "http://www.elks.net" and "https://elks.net/" → "elks.net").
+      identity.account_domain = normalizeDomain(identity.account_domain) || identity.account_domain.toLowerCase();
 
       const stored = await scoringConfigService.get(client_id);
       if (!stored) {
@@ -109,7 +119,7 @@ export const scoringController = {
       // here, before any work.
       let pushTarget: PushTarget | null = null;
       if (push_to_hubspot === true) {
-        const resolved = await resolvePushTarget(config, body, client_id);
+        const resolved = await resolvePushTarget(config, body, client_id, identity);
         if (!resolved.ok) {
           res.status(422).json({ error: resolved.error });
           return;
@@ -175,10 +185,14 @@ export const scoringController = {
       // ── Optional HubSpot push (preconditions already validated above). ─────
       let pushed = false;
       let pushError: string | undefined;
+      let pushAction: "created" | "updated" | undefined;
+      let pushObjectId: string | undefined;
       if (pushTarget) {
         const result = await executePush(pushTarget, finalScore, reasoning, identity);
         if (result.status === "ok") {
           pushed = true;
+          pushAction = result.action;
+          pushObjectId = result.objectId;
           await scoringCacheService.markPushed(client_id, configVersion, valuesHash);
         } else {
           pushError = result.error;
@@ -194,6 +208,8 @@ export const scoringController = {
         reasoning,
         cached: fullHit,
         pushed,
+        ...(pushAction ? { push_action: pushAction } : {}),
+        ...(pushObjectId ? { hubspot_object_id: pushObjectId } : {}),
         ...(reasoningError ? { reasoning_error: reasoningError } : {}),
         ...(pushError ? { push_error: pushError } : {}),
       });
@@ -252,11 +268,13 @@ export const scoringController = {
   },
 };
 
-/** A fully-resolved, ready-to-write HubSpot target for a score push. */
+/** A fully-resolved, ready-to-write HubSpot target for a score push. Scored
+ *  entities are always Companies. `objectId` may be null — then we resolve the
+ *  company by normalized domain (update if found, create if not). */
 interface PushTarget {
   portalId: string;
-  objectType: string;
-  objectId: string;
+  objectId: string | null;
+  domain: string;
   scoreField: string;
   reasoningField: string;
   /** Resolved identity → HubSpot property mapping (config override or defaults). */
@@ -268,13 +286,15 @@ type ResolveResult = { ok: true; target: PushTarget } | { ok: false; error: stri
 /**
  * Resolve everything a push needs — WITHOUT touching HubSpot — so the caller can
  * 422 before we compute/bill a score. The target FIELDS + identity mapping come
- * from the pre-configured hubspot_push block (or defaults); the target RECORD id
- * comes per-call. Never accepts a token.
+ * from the pre-configured hubspot_push block (or defaults). The target RECORD is
+ * either an explicit `hubspot_object_id`, or (when absent) resolved from the
+ * normalized account domain at push time. Never accepts a token.
  */
 async function resolvePushTarget(
   config: ScoringConfigDoc,
   body: any,
-  clientId: string
+  clientId: string,
+  identity: Record<IdentityKey, string>
 ): Promise<ResolveResult> {
   const push = config.hubspot_push;
   if (!push || !push.enabled || !push.score_field || !push.reasoning_field) {
@@ -283,13 +303,6 @@ async function resolvePushTarget(
       error:
         "push_to_hubspot requested but hubspot_push is not enabled/configured for this client " +
         "(need hubspot_push.enabled + score_field + reasoning_field).",
-    };
-  }
-  const objectId = body.hubspot_object_id;
-  if (!objectId) {
-    return {
-      ok: false,
-      error: "push_to_hubspot requires hubspot_object_id (the target HubSpot record to write onto).",
     };
   }
   const client = await clientService.getByExternalId(clientId);
@@ -307,8 +320,8 @@ async function resolvePushTarget(
     ok: true,
     target: {
       portalId: client.hubspot_portal_id,
-      objectType: body.hubspot_object_type || push.object_type || DEFAULT_FIT_OBJECT_TYPE,
-      objectId: String(objectId),
+      objectId: body.hubspot_object_id ? String(body.hubspot_object_id) : null,
+      domain: identity.account_domain,
       scoreField: push.score_field,
       reasoningField: push.reasoning_field,
       identityMap,
@@ -316,9 +329,16 @@ async function resolvePushTarget(
   };
 }
 
-type PushOutcome = { status: "ok" } | { status: "failed"; error: string };
+type PushOutcome =
+  | { status: "ok"; action: "created" | "updated"; objectId: string }
+  | { status: "failed"; error: string };
 
-/** PATCH the score + reasoning + mapped account-identity props onto the record. */
+/**
+ * Write the score + reasoning + mapped identity props onto the client's Company.
+ * Target resolution: explicit object id → update it; otherwise search Companies
+ * by the normalized domain → update the match (create if none exists). Domain is
+ * our dedupe key, so a re-push lands on the same record instead of duplicating.
+ */
 async function executePush(
   target: PushTarget,
   finalScore: number,
@@ -331,9 +351,23 @@ async function executePush(
   };
   // Write our primary ID properties alongside the score (mapped per config).
   for (const k of REQUIRED_IDENTITY) properties[target.identityMap[k]] = identity[k];
+
   try {
-    await updateObjectProperties(target.portalId, target.objectType, target.objectId, properties);
-    return { status: "ok" };
+    // Explicit id wins.
+    if (target.objectId) {
+      await updateObjectProperties(target.portalId, FIT_OBJECT_TYPE, target.objectId, properties);
+      return { status: "ok", action: "updated", objectId: target.objectId };
+    }
+    // Otherwise resolve by domain (our dedupe key).
+    const ids = await searchCompanyIdsByDomain(target.portalId, target.domain);
+    if (ids.length >= 1) {
+      // On the rare duplicate, write to the first and let the response report it.
+      await updateObjectProperties(target.portalId, FIT_OBJECT_TYPE, ids[0], properties);
+      return { status: "ok", action: "updated", objectId: ids[0] };
+    }
+    // No existing company for this domain → create one carrying the identity + score.
+    const id = await createObject(target.portalId, FIT_OBJECT_TYPE, properties);
+    return { status: "ok", action: "created", objectId: id };
   } catch (e) {
     if (e instanceof HubspotAccessError) {
       return { status: "failed", error: `HubSpot access not active: ${e.message}` };

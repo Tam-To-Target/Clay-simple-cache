@@ -132,4 +132,20 @@ describe("normalizeDomain", () => {
   it("trims whitespace", () => {
     expect(normalizeDomain("  google.com  ")).toBe("google.com");
   });
+
+  it("normalizes the account_domain URL formats from real TAM exports", () => {
+    expect(normalizeDomain("http://www.elks.net")).toBe("elks.net");
+    expect(normalizeDomain("http://www.mercerschools.org")).toBe("mercerschools.org");
+    expect(normalizeDomain("http://www.dbths.org")).toBe("dbths.org");
+    expect(normalizeDomain("https://pusdk8.us")).toBe("pusdk8.us");
+    expect(normalizeDomain("https://burlingameschools.org")).toBe("burlingameschools.org");
+    expect(normalizeDomain("https://hamburgschool.com/")).toBe("hamburgschool.com");
+    expect(normalizeDomain("http://kingwoodschool.org")).toBe("kingwoodschool.org");
+  });
+
+  it("strips path, query, fragment and port", () => {
+    expect(normalizeDomain("https://example.com/foo/bar?x=1#y")).toBe("example.com");
+    expect(normalizeDomain("example.com:8080")).toBe("example.com");
+    expect(normalizeDomain("https://www.example.com//")).toBe("example.com");
+  });
 });

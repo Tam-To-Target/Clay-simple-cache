@@ -128,6 +128,50 @@ export async function updateObjectProperties(
   }
 }
 
+/**
+ * Find company record ids whose `domain` exactly matches (case-insensitive; the
+ * caller passes an already-normalized bare domain). Returns all matching ids so
+ * the caller can detect/handle duplicates. Used by fit-score push to locate the
+ * target company when no explicit object id is supplied.
+ */
+export async function searchCompanyIdsByDomain(
+  portalId: string,
+  domain: string
+): Promise<string[]> {
+  const res = await hsFetch(portalId, `/crm/v3/objects/companies/search`, {
+    method: "POST",
+    body: JSON.stringify({
+      filterGroups: [{ filters: [{ propertyName: "domain", operator: "EQ", value: domain }] }],
+      properties: ["domain"],
+      limit: 10,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new HubspotApiError(`Company search by domain failed: HTTP ${res.status} ${body}`, res.status);
+  }
+  const json = (await res.json()) as { results?: Array<{ id: string }> };
+  return (json.results || []).map((r) => r.id);
+}
+
+/** Create an object of `objectType` with `properties`; returns the new id. */
+export async function createObject(
+  portalId: string,
+  objectType: string,
+  properties: Record<string, any>
+): Promise<string> {
+  const res = await hsFetch(portalId, `/crm/v3/objects/${encodeURIComponent(objectType)}`, {
+    method: "POST",
+    body: JSON.stringify({ properties }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new HubspotApiError(`Create ${objectType} failed: HTTP ${res.status} ${body}`, res.status);
+  }
+  const json = (await res.json()) as { id: string };
+  return json.id;
+}
+
 /** Delete a contact by id (used for test cleanup). */
 export async function deleteHubspotContact(portalId: string, id: string): Promise<void> {
   const res = await hsFetch(portalId, `/crm/v3/objects/contacts/${id}`, { method: "DELETE" });

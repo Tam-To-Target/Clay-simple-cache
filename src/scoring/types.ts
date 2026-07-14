@@ -92,9 +92,8 @@ export interface HubspotPushConfig {
   enabled: boolean;
   score_field?: string;
   reasoning_field?: string;
-  /** HubSpot object the score is written to. Default "companies" (districts). */
-  object_type?: string;
-  /** Per-client override of the identity → HubSpot property mapping. */
+  /** Per-client override of the identity → HubSpot property mapping. The score
+   *  is always written to a Company (districts), located/deduped by domain. */
   identity_fields?: IdentityFieldMap;
 }
 
