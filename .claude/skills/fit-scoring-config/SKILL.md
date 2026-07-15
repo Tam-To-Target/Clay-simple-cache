@@ -213,11 +213,18 @@ the engine's. The prompt keeps only context + word rules + missing-data handling
    The validator requires `score_field` + `reasoning_field` when `enabled`.
    `object_type` (default `"companies"`) and `identity_fields` (defaults shown) are
    optional — omit `identity_fields` to use the defaults.
-3. Per call, pass `"push_to_hubspot": true` and `"hubspot_object_id": "<id>"`
-   (the record to write onto). The score → `score_field`, reasoning →
-   `reasoning_field`, and the three identity props → their mapped HubSpot fields,
-   all PATCHed onto that record. The API resolves the client's HubSpot token
-   server-side via the provisioner — **never pass a token**.
+3. Per call, pass `"push_to_hubspot": true`. The target Company is resolved by
+   the normalized `account_domain` (or an explicit `"hubspot_object_id"` if you
+   pass one):
+   - **Existing company (update):** writes ONLY `score_field` + `reasoning_field`.
+     Identity props are NOT written on update — the CRM's own name/domain/
+     starbridge id are canonical and must not be clobbered (our `account_name`
+     can legitimately differ from the CRM's).
+   - **No match (create):** creates a Company carrying the identity props
+     (name/domain/starbridge) + the score + reasoning.
+
+   The API resolves the client's HubSpot token server-side via the provisioner —
+   **never pass a token**.
 4. `422` if push is requested but `hubspot_push` isn't enabled/configured or
    `hubspot_object_id` is missing. The score is still computed and returned.
 

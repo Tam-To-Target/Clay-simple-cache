@@ -345,28 +345,33 @@ async function executePush(
   reasoning: string | null,
   identity: Record<IdentityKey, string>
 ): Promise<PushOutcome> {
-  const properties: Record<string, any> = {
+  // On UPDATE we write ONLY the score + reasoning — never the identity props.
+  // The account already exists in HubSpot with its own canonical name/domain/
+  // starbridge id, and our request's account_name can differ (e.g. "Burlingame
+  // Elementary School District" vs the CRM's "Burlingame School District"), so
+  // writing identity on update would clobber good data.
+  const scoreProps: Record<string, any> = {
     [target.scoreField]: finalScore,
     [target.reasoningField]: reasoning ?? "",
   };
-  // Write our primary ID properties alongside the score (mapped per config).
-  for (const k of REQUIRED_IDENTITY) properties[target.identityMap[k]] = identity[k];
 
   try {
-    // Explicit id wins.
+    // Explicit id wins → update score only.
     if (target.objectId) {
-      await updateObjectProperties(target.portalId, FIT_OBJECT_TYPE, target.objectId, properties);
+      await updateObjectProperties(target.portalId, FIT_OBJECT_TYPE, target.objectId, scoreProps);
       return { status: "ok", action: "updated", objectId: target.objectId };
     }
     // Otherwise resolve by domain (our dedupe key).
     const ids = await searchCompanyIdsByDomain(target.portalId, target.domain);
     if (ids.length >= 1) {
       // On the rare duplicate, write to the first and let the response report it.
-      await updateObjectProperties(target.portalId, FIT_OBJECT_TYPE, ids[0], properties);
+      await updateObjectProperties(target.portalId, FIT_OBJECT_TYPE, ids[0], scoreProps);
       return { status: "ok", action: "updated", objectId: ids[0] };
     }
-    // No existing company for this domain → create one carrying the identity + score.
-    const id = await createObject(target.portalId, FIT_OBJECT_TYPE, properties);
+    // No existing company for this domain → CREATE one carrying identity + score.
+    const createProps: Record<string, any> = { ...scoreProps };
+    for (const k of REQUIRED_IDENTITY) createProps[target.identityMap[k]] = identity[k];
+    const id = await createObject(target.portalId, FIT_OBJECT_TYPE, createProps);
     return { status: "ok", action: "created", objectId: id };
   } catch (e) {
     if (e instanceof HubspotAccessError) {
