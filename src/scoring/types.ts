@@ -95,6 +95,11 @@ export interface HubspotPushConfig {
   /** Per-client override of the identity → HubSpot property mapping. The score
    *  is always written to a Company (districts), located/deduped by domain. */
   identity_fields?: IdentityFieldMap;
+  /** When true, an UPDATE to an existing company backfills identity props that
+   *  are currently EMPTY (never overwrites a non-empty value). Default false —
+   *  updates then write only the score + reasoning and never touch identity.
+   *  (Identity is always written in full when CREATING a new company.) */
+  backfill_identity?: boolean;
 }
 
 export interface ScoringConfigDoc {

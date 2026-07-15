@@ -10,6 +10,7 @@ import {
   updateObjectProperties,
   searchCompanyIdsByDomain,
   createObject,
+  getObjectProperties,
   HubspotApiError,
 } from "../services/hubspot-contacts.service";
 import { HubspotAccessError } from "../services/hubspot-token.service";
@@ -279,6 +280,8 @@ interface PushTarget {
   reasoningField: string;
   /** Resolved identity → HubSpot property mapping (config override or defaults). */
   identityMap: Record<IdentityKey, string>;
+  /** When true, backfill EMPTY identity props on update (never overwrite). */
+  backfillIdentity: boolean;
 }
 
 type ResolveResult = { ok: true; target: PushTarget } | { ok: false; error: string };
@@ -325,6 +328,7 @@ async function resolvePushTarget(
       scoreField: push.score_field,
       reasoningField: push.reasoning_field,
       identityMap,
+      backfillIdentity: !!push.backfill_identity,
     },
   };
 }
@@ -345,27 +349,46 @@ async function executePush(
   reasoning: string | null,
   identity: Record<IdentityKey, string>
 ): Promise<PushOutcome> {
-  // On UPDATE we write ONLY the score + reasoning — never the identity props.
-  // The account already exists in HubSpot with its own canonical name/domain/
-  // starbridge id, and our request's account_name can differ (e.g. "Burlingame
-  // Elementary School District" vs the CRM's "Burlingame School District"), so
-  // writing identity on update would clobber good data.
+  // On UPDATE we write the score + reasoning, and — only if backfill_identity is
+  // on — identity props that are currently EMPTY on the record (never overwrite
+  // a non-empty value). Default (flag off): score + reasoning only. This avoids
+  // clobbering the CRM's canonical identity, since our request's account_name can
+  // legitimately differ (e.g. "Burlingame Elementary School District" vs the
+  // CRM's "Burlingame School District").
   const scoreProps: Record<string, any> = {
     [target.scoreField]: finalScore,
     [target.reasoningField]: reasoning ?? "",
   };
 
+  // Build the update payload for an existing company id, applying empty-only
+  // identity backfill when enabled.
+  const buildUpdateProps = async (objectId: string): Promise<Record<string, any>> => {
+    const props: Record<string, any> = { ...scoreProps };
+    if (target.backfillIdentity) {
+      const fields = REQUIRED_IDENTITY.map((k) => target.identityMap[k]);
+      const current = await getObjectProperties(target.portalId, FIT_OBJECT_TYPE, objectId, fields);
+      for (const k of REQUIRED_IDENTITY) {
+        const field = target.identityMap[k];
+        const cur = current[field];
+        if (cur === undefined || cur === null || String(cur).trim() === "") props[field] = identity[k];
+      }
+    }
+    return props;
+  };
+
   try {
-    // Explicit id wins → update score only.
+    // Explicit id wins → update (with optional empty-only backfill).
     if (target.objectId) {
-      await updateObjectProperties(target.portalId, FIT_OBJECT_TYPE, target.objectId, scoreProps);
+      const props = await buildUpdateProps(target.objectId);
+      await updateObjectProperties(target.portalId, FIT_OBJECT_TYPE, target.objectId, props);
       return { status: "ok", action: "updated", objectId: target.objectId };
     }
     // Otherwise resolve by domain (our dedupe key).
     const ids = await searchCompanyIdsByDomain(target.portalId, target.domain);
     if (ids.length >= 1) {
       // On the rare duplicate, write to the first and let the response report it.
-      await updateObjectProperties(target.portalId, FIT_OBJECT_TYPE, ids[0], scoreProps);
+      const props = await buildUpdateProps(ids[0]);
+      await updateObjectProperties(target.portalId, FIT_OBJECT_TYPE, ids[0], props);
       return { status: "ok", action: "updated", objectId: ids[0] };
     }
     // No existing company for this domain → CREATE one carrying identity + score.

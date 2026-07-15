@@ -9,6 +9,7 @@ vi.mock("../../src/services/hubspot-token.service", () => {
 import {
   searchCompanyIdsByDomain,
   createObject,
+  getObjectProperties,
   HubspotApiError,
 } from "../../src/services/hubspot-contacts.service";
 
@@ -54,5 +55,18 @@ describe("createObject", () => {
   it("throws HubspotApiError on failure", async () => {
     mockFetch(400, { message: "bad" });
     await expect(createObject("p1", "companies", {})).rejects.toBeInstanceOf(HubspotApiError);
+  });
+});
+
+describe("getObjectProperties", () => {
+  it("returns the properties map", async () => {
+    mockFetch(200, { id: "1", properties: { name: "Acme", starbridge_buyer_id: "" } });
+    const p = await getObjectProperties("p1", "companies", "1", ["name", "starbridge_buyer_id"]);
+    expect(p).toEqual({ name: "Acme", starbridge_buyer_id: "" });
+  });
+
+  it("throws HubspotApiError on a non-ok response", async () => {
+    mockFetch(404, { message: "not found" });
+    await expect(getObjectProperties("p1", "companies", "1", ["name"])).rejects.toBeInstanceOf(HubspotApiError);
   });
 });

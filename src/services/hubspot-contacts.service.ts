@@ -154,6 +154,27 @@ export async function searchCompanyIdsByDomain(
   return (json.results || []).map((r) => r.id);
 }
 
+/** Read selected `properties` of an object by id. Returns the properties map. */
+export async function getObjectProperties(
+  portalId: string,
+  objectType: string,
+  objectId: string,
+  properties: string[]
+): Promise<Record<string, any>> {
+  const q = properties.length ? `?properties=${properties.map(encodeURIComponent).join(",")}` : "";
+  const res = await hsFetch(
+    portalId,
+    `/crm/v3/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}${q}`,
+    { method: "GET" }
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new HubspotApiError(`Read ${objectType}/${objectId} failed: HTTP ${res.status} ${body}`, res.status);
+  }
+  const json = (await res.json()) as { properties?: Record<string, any> };
+  return json.properties || {};
+}
+
 /** Create an object of `objectType` with `properties`; returns the new id. */
 export async function createObject(
   portalId: string,

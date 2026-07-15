@@ -200,19 +200,22 @@ the engine's. The prompt keeps only context + word rules + missing-data handling
    ```json
    "hubspot_push": {
      "enabled": true,
-     "score_field": "lead_fit_score",
-     "reasoning_field": "lead_fit_score_reasoning",
-     "object_type": "companies",
+     "score_field": "ttt_fit_score",
+     "reasoning_field": "ttt_fit_score_summary",
      "identity_fields": {
        "account_name": "name",
        "account_domain": "domain",
-       "starbridge_id": "starbridge_id"
-     }
+       "starbridge_id": "starbridge_buyer_id"
+     },
+     "backfill_identity": false
    }
    ```
    The validator requires `score_field` + `reasoning_field` when `enabled`.
-   `object_type` (default `"companies"`) and `identity_fields` (defaults shown) are
-   optional — omit `identity_fields` to use the defaults.
+   `identity_fields` (defaults name/domain/starbridge_id) is optional. The score
+   is always written to a Company, located/deduped by domain.
+   `backfill_identity` (default `false`) — when `true`, an update also fills
+   identity props that are currently EMPTY on the company (never overwrites a
+   non-empty value); when `false`, updates write only score + reasoning.
 3. Per call, pass `"push_to_hubspot": true`. The target Company is resolved by
    the normalized `account_domain` (or an explicit `"hubspot_object_id"` if you
    pass one):

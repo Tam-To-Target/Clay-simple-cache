@@ -121,6 +121,9 @@ export function validateConfig(input: unknown): ValidationResult {
     if (!h.reasoning_field || !String(h.reasoning_field).trim()) {
       err("hubspot_push.reasoning_field", "reasoning_field required when hubspot_push.enabled");
     }
+    if (h.backfill_identity !== undefined && typeof h.backfill_identity !== "boolean") {
+      err("hubspot_push.backfill_identity", "backfill_identity must be a boolean");
+    }
     // identity_fields is an optional { account_name?, account_domain?,
     // starbridge_id? } → HubSpot-property map; unset keys use defaults.
     if (h.identity_fields !== undefined) {
