@@ -6,7 +6,6 @@ describe("slug-aliases", () => {
     expect(gtmosSlugFor("bridgeit")).toBe("bridge-it");
     expect(gtmosSlugFor("gtg")).toBe("geographic-technologies-group");
     expect(gtmosSlugFor("studer")).toBe("studer-education");
-    expect(gtmosSlugFor("studor")).toBe("studer-education");
   });
 
   it("passes through a slug with no divergence", () => {
@@ -17,6 +16,8 @@ describe("slug-aliases", () => {
     expect(canonicalClientSlug("bridge-it")).toBe("bridgeit");
     expect(canonicalClientSlug("geographic-technologies-group")).toBe("gtg");
     expect(canonicalClientSlug("studer-education")).toBe("studer");
+    // studor is the deleted typo — still resolves to the canonical studer.
+    expect(canonicalClientSlug("studor")).toBe("studer");
   });
 
   it("returns an unknown/canonical slug unchanged", () => {

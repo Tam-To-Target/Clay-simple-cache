@@ -23,9 +23,7 @@ interface ClientAlias {
 const CLIENT_ALIASES: Record<string, ClientAlias> = {
   bridgeit: { gtmos: "bridge-it", aliases: ["bridge-it"] },
   gtg: { gtmos: "geographic-technologies-group", aliases: ["geographic-technologies-group"] },
-  studer: { gtmos: "studer-education", aliases: ["studer-education"] },
-  // Likely a typo dup of `studer`; still map its history to Studer Education.
-  studor: { gtmos: "studer-education", aliases: [] },
+  studer: { gtmos: "studer-education", aliases: ["studer-education", "studor"] },
 };
 
 /** The GTMOS slug to look up history under for one of our clients. */

@@ -324,7 +324,11 @@ connected yet (see Create Contact / Backfill below). The HubSpot token is never 
 ### 9. Get Client
 **GET** \`/admin/clients/:external_id\`
 
-Returns the client and its DNC sources (with last-sync status). The HubSpot token is never included.
+Returns the client, its DNC sources (with last-sync status), and the PhoneBurner
+**\`sdrs\`** assigned to it — \`[{ pbMemberId, name, slug, username }]\` — so a caller
+knows which \`sdr\` to pass to the list-upload endpoint (§19). Accepts known slug
+aliases (e.g. a GTMOS-style \`bridge-it\` resolves to \`bridgeit\`). The HubSpot token
+is never included.
 
 ### 10. Register DNC Source
 **POST** \`/admin/dnc/sources\`

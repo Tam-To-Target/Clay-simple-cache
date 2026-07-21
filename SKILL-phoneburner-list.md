@@ -59,6 +59,12 @@ ambiguous) and use that slug. The endpoint also accepts known slug aliases
 (e.g. a GTMOS-style `bridge-it` resolves to `bridgeit`), but prefer the canonical
 slug. If the client genuinely isn't set up, stop and say so.
 
+The response includes `sdrs: [{ name, slug, username, pbMemberId }]` — the SDRs
+who dial for this client. Use it to pick the `sdr` up front: if there's exactly
+one, you can go straight to the upload; if several, ask the user which. (The
+upload endpoint also returns the same list in its `409 needs_sdr`, so either path
+works.)
+
 ## Step 1 — Build the contacts array from the CSV
 
 The endpoint takes JSON, not a CSV. Convert each row to

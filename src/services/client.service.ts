@@ -1,6 +1,7 @@
 import prisma from "../db/prisma";
 import type { Client } from "@prisma/client";
 import { suggestSimilar } from "./suggest";
+import { canonicalClientSlug } from "../config/slug-aliases";
 
 /** Closest known client handles for an unknown client_id (friendlier 404s). */
 export async function clientSuggestions(query: string): Promise<string[]> {
@@ -33,7 +34,14 @@ export function publicClient(client: Client) {
 
 export const clientService = {
   async getByExternalId(externalId: string): Promise<Client | null> {
-    return prisma.client.findUnique({ where: { external_id: externalId } });
+    const direct = await prisma.client.findUnique({ where: { external_id: externalId } });
+    if (direct) return direct;
+    // Fall back to a known slug alias (e.g. GTMOS-style "bridge-it" → "bridgeit").
+    const canonical = canonicalClientSlug(externalId);
+    if (canonical !== externalId) {
+      return prisma.client.findUnique({ where: { external_id: canonical } });
+    }
+    return null;
   },
 
   /** Create or update a client keyed by external_id. */

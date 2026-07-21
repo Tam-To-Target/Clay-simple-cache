@@ -19,6 +19,7 @@ import {
 } from "../services/dnc-sync.service";
 import { fetchListById, searchLists } from "../services/hubspot-lists.service";
 import { getValidToken } from "../services/hubspot-token.service";
+import { resolveClientSdrs } from "../services/phoneburner-upload.service";
 
 export const dncController = {
   /**
@@ -197,13 +198,18 @@ export const dncController = {
     }
   },
 
-  /** GET /admin/clients/:external_id — inspect a client + its DNC sources. */
+  /**
+   * GET /admin/clients/:external_id — inspect a client + its DNC sources + the
+   * PhoneBurner SDRs assigned to it (so a caller knows which `sdr` to pass to the
+   * upload endpoint). Resolves known slug aliases (e.g. GTMOS-style "bridge-it").
+   */
   async getClient(req: Request, res: Response): Promise<void> {
     try {
-      const client = await prisma.client.findUnique({
-        where: { external_id: req.params.external_id },
-        include: { dnc_sources: true },
-      });
+      // Alias-aware resolution, then reload with dnc_sources included.
+      const resolved = await clientService.getByExternalId(req.params.external_id);
+      const client = resolved
+        ? await prisma.client.findUnique({ where: { id: resolved.id }, include: { dnc_sources: true } })
+        : null;
       if (!client) {
         const suggestions = await clientSuggestions(req.params.external_id);
         res.status(404).json({
@@ -212,8 +218,9 @@ export const dncController = {
         });
         return;
       }
+      const sdrs = await resolveClientSdrs(client);
       const { dnc_sources, ...rest } = client;
-      res.json({ client: { ...publicClient(rest as any), dnc_sources } });
+      res.json({ client: { ...publicClient(rest as any), dnc_sources, sdrs } });
     } catch (error: any) {
       res.status(500).json({ error: error.message || "Internal server error" });
     }

@@ -7,7 +7,6 @@ import {
   uploadContacts,
   UploadInputError,
 } from "../services/phoneburner-upload.service";
-import { canonicalClientSlug } from "../config/slug-aliases";
 
 export const phoneburnerController = {
   /**
@@ -102,10 +101,8 @@ export const phoneburnerController = {
         return;
       }
 
-      // Accept a GTMOS/legacy slug variant and resolve it to our canonical id.
-      const client =
-        (await clientService.getByExternalId(client_id)) ??
-        (await clientService.getByExternalId(canonicalClientSlug(client_id)));
+      // getByExternalId resolves known slug aliases (e.g. GTMOS-style "bridge-it").
+      const client = await clientService.getByExternalId(client_id);
       if (!client || !client.active) {
         const suggestions = await clientSuggestions(client_id);
         res.status(404).json({
