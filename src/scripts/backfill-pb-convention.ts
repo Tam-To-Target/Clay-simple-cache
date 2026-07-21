@@ -23,6 +23,7 @@ dotenv.config();
 import { Client as PgClient } from "pg";
 import prisma from "../db/prisma";
 import { parseLeadScore } from "../services/pb-lead-score.service";
+import { gtmosSlugFor } from "../config/slug-aliases";
 
 /** A real Lead Score is a short alphanumeric token with a trailing number
  *  (e.g. "CLUB7"). Reject polluted values — URLs, free text, absurd length —
@@ -65,7 +66,7 @@ async function main(): Promise<void> {
 
     let touched = 0;
     for (const c of ourClients) {
-      const gid = gtmosBySlug.get(c.external_id);
+      const gid = gtmosBySlug.get(c.external_id) ?? gtmosBySlug.get(gtmosSlugFor(c.external_id));
       if (!gid) {
         console.log(c.external_id.padEnd(22), "(no GTMOS client for slug — skipped)");
         continue;
