@@ -624,6 +624,58 @@ reported per member.
 
 ---
 
+### 19. PhoneBurner list upload
+**POST** \`/admin/phoneburner/upload\`
+
+Pushes a lead list into the assigned SDR's PhoneBurner dialing book — the
+programmatic replacement for the manual "saved-search folder → Clay → CSV
+import" flow. The client + campaign become searchable **tags**, the lead-group
+identifier (e.g. \`club8\`) becomes the **folder** (\`category_id\`, created if
+absent), and leads are created under the SDR's own token (\`owner_id\` = their
+member id). Numbers already on the client's DNC are **scrubbed before upload**
+by default (see \`PHONEBURNER_DNC_PURGE_PLAN.md\` §9) so the import doesn't feed the
+very numbers the daily purge then deletes.
+
+The SDR→client mapping is the same one the purge uses (\`phoneburner_members\`);
+tokens are resolved from GTMOS, so \`SDR_LAUNCH_INTERNAL_URL\`/\`_SECRET\` must be set.
+
+**Request Body (JSON)**:
+| Field | Type | Required | Description |
+|---|---|---|---|
+| \`client_id\` | String | Yes | Client \`external_id\` (slug). |
+| \`sdr\` | String | Conditional | slug \\| name \\| email \\| \`pb_member_id\`. Required only when >1 SDR is assigned; a \`409 {needs_sdr, sdrs[]}\` lists the choices. |
+| \`contacts\` | Array | Yes | Rows: a bare phone string, or \`{ phone, first_name?, last_name?, name?, company?, email?, title?, notes? }\`. \`phone\` is required per row. |
+| \`campaign\` | String | No | Added as a tag (e.g. \`ISTE 2026 TAM\`). |
+| \`lead_group\` | String | No | Folder name (e.g. \`club8\`); resolved or created. |
+| \`attempt\` | String | No | Added as a tag (e.g. \`first attempt\`). |
+| \`tags\` | String[] | No | Extra tags. |
+| \`dnc_scrub\` | Boolean | No | Default \`true\`. \`false\` uploads everything unchecked. |
+| \`on_duplicate\` | String | No | \`update\` (default) or \`skip\`. |
+| \`dry_run\` | Boolean | No | Validate + DNC-scrub + report without creating anything. |
+
+**Response (JSON)**:
+\`\`\`json
+{
+  "status": "ok",
+  "dryRun": false,
+  "clientId": "club-hub",
+  "sdr": { "pbMemberId": "111", "name": "Prince Derek", "slug": "prince-derek", "username": "prince@tamtotarget.com" },
+  "folder": { "id": "11888", "name": "club8", "created": false },
+  "tags": ["Club Hub", "ISTE 2026 TAM", "first attempt"],
+  "totals": { "received": 300, "invalid": 2, "dnc_skipped": 11, "attempted": 287, "uploaded": 285, "failed": 2 },
+  "dnc_skipped": [{ "phone": "+1...", "email": null, "matched_on": "phone", "matched_value": "+1..." }],
+  "invalid": [{ "input": "...", "reason": "unparseable phone: ..." }],
+  "failed": [{ "phone": "+1...", "status": 422, "error": "..." }]
+}
+\`\`\`
+Detail arrays are capped at 100 entries; the \`totals\` counts are always exact.
+
+**Errors**: \`400\` (missing \`client_id\`/\`contacts\`, GTMOS config absent, no active
+SDR, unknown \`sdr\`, or the chosen SDR has no PhoneBurner token), \`404\` (unknown
+client, with \`suggestions\`), \`409\` (SDR choice needed, with \`sdrs[]\`), \`500\`.
+
+---
+
 ## Fit Scoring (config-driven, multi-tenant)
 
 Scores a target account against a client's stored rubric and returns a 0-100

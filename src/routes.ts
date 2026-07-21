@@ -55,6 +55,9 @@ router.get('/clients/:slug/contacts', requireIdentity, contactsController.buildL
 
 // PhoneBurner DNC purge (delete DNC-colliding contacts from members' books)
 router.post('/admin/phoneburner/purge', authMiddleware, phoneburnerController.purge);
+// PhoneBurner list upload (push a lead list into the assigned SDR's book,
+// DNC-scrubbed, tagged, foldered)
+router.post('/admin/phoneburner/upload', authMiddleware, phoneburnerController.upload);
 
 // ── Config-driven fit scoring (multi-tenant) ────────────────────────────────
 // Deterministic scoring in the engine; AI writes reasoning text only. Config
