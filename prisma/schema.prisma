@@ -142,13 +142,46 @@ model Client {
   // diffSourceEntries and the DNC pipeline optimization plan.
   dnc_changed_at       DateTime? @db.Timestamptz(6)
 
+  // PhoneBurner list convention, seeded from GTMOS call history by
+  // scripts/backfill-pb-convention.ts (then owned here — see pb-lead-score.service
+  // and phoneburner-upload.service). `pb_client_tag` is the account's PascalCase
+  // client tag (e.g. "PlanIt"); `pb_lead_score_prefix` is the per-list Lead Score
+  // prefix parsed from history (e.g. "club" for "club8") used to mint the next one.
+  pb_client_tag        String?
+  pb_lead_score_prefix String?
+
   dnc_sources         DncSource[]
   dnc_entries         DncEntry[]
   phoneburner_members PhoneburnerMember[]
   contact_links       ContactClient[]
+  pb_lead_scores      PbLeadScore[]
 
   @@index([external_id])
   @@map("clients")
+}
+
+// Ledger of PhoneBurner "Lead Score" identifiers issued (or historically seen)
+// per client. A Lead Score labels one uploaded list and must never collide with
+// another list's (a wrong reuse mixes two lists in the dialer). Seeded from GTMOS
+// call history by the backfill, then appended to whenever the upload endpoint
+// mints a new one — so "next" is computed here, not re-derived from GTMOS.
+model PbLeadScore {
+  id         String   @id @default(uuid()) @db.Uuid
+  client_id  String   @db.Uuid
+  client     Client   @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  // Full identifier, e.g. "club8". Unique per client.
+  lead_score String
+  // Parsed pieces: "club" + 8 for "club8". `seq` drives the next-value calc.
+  prefix     String
+  seq        Int
+  // 'backfill' (seen in GTMOS call history) | 'issued' (minted by the endpoint).
+  source     String
+  campaign   String?
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([client_id, lead_score])
+  @@index([client_id, prefix, seq])
+  @@map("pb_lead_scores")
 }
 
 // ─── Contact ↔ Customer association (Phase 3) ───────────────────────────────

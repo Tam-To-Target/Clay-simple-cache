@@ -55,12 +55,14 @@ export const phoneburnerController = {
    *   client_id,                       // client slug (required)
    *   sdr?,                            // slug | name | email | pb_member_id
    *                                    //   (required only when >1 SDR is assigned)
-   *   campaign?, lead_group?, attempt?, tags?,   // labeling (see service)
+   *   campaign?, lead_score?, attempt?, tags?,    // labeling (see service)
    *   dnc_scrub? = true, on_duplicate? = "update", dry_run? = false,
    *   contacts: (string | { phone, first_name?, last_name?, name?, company?, email?, title?, notes? })[]
    * }
-   * Uploads a lead list into the assigned SDR's PhoneBurner book (client+campaign
-   * → tags, lead_group → folder), scrubbing the client's DNC first by default.
+   * Uploads a lead list into the assigned SDR's PhoneBurner book: client tag +
+   * "<ClientTag>: <Campaign>" tags, a "Lead Score" custom field (auto-minted for
+   * the client unless `lead_score` is given, stamped on net-new contacts only),
+   * scrubbing the client's DNC first by default.
    *
    * When more than one SDR is assigned and `sdr` is missing/ambiguous, responds
    * 409 with { needs_sdr:true, sdrs:[…] } so the caller can pick.
@@ -71,7 +73,8 @@ export const phoneburnerController = {
         client_id,
         sdr,
         campaign,
-        lead_group,
+        lead_score,
+        lead_group, // deprecated alias for lead_score
         attempt,
         tags,
         dnc_scrub,
@@ -113,7 +116,7 @@ export const phoneburnerController = {
 
       const result = await uploadContacts(client, chosen, contacts, {
         campaign,
-        leadGroup: lead_group,
+        leadScore: typeof lead_score === "string" ? lead_score : typeof lead_group === "string" ? lead_group : undefined,
         attempt,
         tags: Array.isArray(tags) ? tags : undefined,
         dncScrub: typeof dnc_scrub === "boolean" ? dnc_scrub : undefined,

@@ -15,6 +15,7 @@
     "dnc:sync": "ts-node src/scripts/sync-dnc.ts",
     "pb:bootstrap": "ts-node src/scripts/bootstrap-phoneburner.ts",
     "pb:purge": "ts-node src/scripts/purge-phoneburner.ts",
+    "pb:backfill-convention": "ts-node src/scripts/backfill-pb-convention.ts",
     "ops:daily": "ts-node src/scripts/ops-daily.ts",
     "smoke:scoring": "ts-node src/scripts/smoke-scoring.ts",
     "test": "vitest run",

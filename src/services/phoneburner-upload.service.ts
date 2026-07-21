@@ -1,49 +1,54 @@
 /**
  * Upload a list of leads into an SDR's PhoneBurner book (the programmatic
- * replacement for the manual "create saved-search folder → Clay → CSV import"
- * flow).
+ * replacement for the manual "Clay → CSV import" flow), following the shared
+ * dialing org's real convention (validated 2026-07-21, see SKILL-phoneburner-list.md):
  *
- * The end result mirrors the manual process:
- *  - the leads land in the assigned SDR's own book (created with that SDR's
- *    personal access token, `owner_id` = their PhoneBurner member id);
- *  - each lead is stamped with the client tag + campaign name (searchable tags)
- *    and dropped into a folder named after the lead-group identifier
- *    (e.g. "club8"), which is what the SDR builds their saved search on;
- *  - numbers already on the client's Do-Not-Contact list are scrubbed BEFORE
- *    they ever enter PhoneBurner (see PHONEBURNER_DNC_PURGE_PLAN.md §9) so the
- *    import doesn't feed the very numbers the daily purge then deletes.
+ *  - the org does NOT use per-client folders. A client is a TAG (its PascalCase
+ *    client tag, e.g. "PlanIt"); a campaign is the tag "<ClientTag>: <Campaign>";
+ *    the per-list identifier is a CUSTOM FIELD named "Lead Score" (e.g. "club8");
+ *  - leads are created under the assigned SDR's own token (`owner_id` = their
+ *    PhoneBurner member id);
+ *  - PhoneBurner de-dupes on email/phone and MERGES on overlap. Setting Lead Score
+ *    on a merged contact would OVERWRITE its prior list's — so we snapshot the
+ *    seat's book first and stamp Lead Score on NET-NEW contacts only (existing
+ *    contacts still get the new campaign tag, just not a new Lead Score);
+ *  - numbers on the client's DNC are scrubbed BEFORE upload (PHONEBURNER_DNC_PURGE_PLAN.md
+ *    §9); the response reports coverage + every collision so "clean" and
+ *    "unchecked" are never confused.
  *
- * Identity comes from the same sources the purge uses: the client → PhoneBurner
- * member mapping is the local `phoneburner_members` table (bootstrapped from
- * data/clients.json), and each member's dialing token is resolved from GTMOS via
- * phoneburner-token.service. Display names/slugs for SDR selection are enriched
- * from the committed registry (the DB row only stores the member id + email).
+ * The Lead Score is minted by pb-lead-score.service (seeded once from GTMOS call
+ * history by scripts/backfill-pb-convention.ts, then owned here). Custom fields
+ * MUST be the `[{name,type,value}]` array shape — a plain dict returns 200 but
+ * silently persists nothing.
  */
 
 import prisma from "../db/prisma";
 import type { Client } from "@prisma/client";
 import { normalizeEmail, normalizePhone } from "./normalization";
 import { normalizeCheckIdentifiers, dncService } from "./dnc.service";
-import { getMemberToken, phoneburnerApiBase, flattenPbCollection } from "./phoneburner-token.service";
+import { getMemberToken } from "./phoneburner-token.service";
+import { phoneburnerApiBase } from "./phoneburner-token.service";
+import { fetchMemberContacts, PhoneburnerAccessError } from "./phoneburner.service";
 import { withRetry, createThrottle, mapWithConcurrency } from "./http-retry";
 import { loadRegistry, slugify } from "../config/registry";
+import { issueLeadScore, peekNextLeadScore, recordLeadScore, type LeadScore } from "./pb-lead-score.service";
 
 const USER_AGENT = process.env.PHONEBURNER_USER_AGENT || "TAM-DNC-Cache/1.0";
 const MAX_RETRIES = 5;
-// PhoneBurner rate-limits per member account; a single upload run targets one
-// member, so a per-run spacer + small concurrency keeps us comfortably under it.
 const UPLOAD_CONCURRENCY = 4;
 const UPLOAD_SPACING_MS = 150;
-// Cap how many per-row detail entries we echo back so a 10k-row upload doesn't
-// return a 10k-element error array. Counts are always exact.
 const DETAIL_CAP = 100;
+
+// PhoneBurner custom-field name for the per-list identifier and the job title.
+const LEAD_SCORE_FIELD = "Lead Score";
+const JOB_TITLE_FIELD = "Job Title";
+const CF_TYPE_TEXT = 1;
 
 /** A resolvable SDR (PhoneBurner member) assigned to a client. */
 export interface SdrOption {
   pbMemberId: string;
   name: string;
   username: string | null;
-  /** Stable, URL-safe id derived from the name (unique within the client). */
   slug: string;
 }
 
@@ -52,7 +57,6 @@ export interface UploadContactInput {
   phone?: string;
   first_name?: string;
   last_name?: string;
-  /** Full name, split into first/last when first_name/last_name are absent. */
   name?: string;
   company?: string;
   email?: string;
@@ -61,18 +65,13 @@ export interface UploadContactInput {
 }
 
 export interface UploadOptions {
-  /** Client tag + campaign go into PhoneBurner tags[]. */
   campaign?: string;
-  /** Lead-group identifier (e.g. "club8") → the PhoneBurner folder name. */
-  leadGroup?: string;
-  /** Optional extra searchable tags (e.g. "first attempt"). */
+  /** Explicit Lead Score override. Omit to auto-mint the next one for the client. */
+  leadScore?: string;
   attempt?: string;
   tags?: string[];
-  /** Scrub against the client's DNC before uploading. Default true. */
-  dncScrub?: boolean;
-  /** PhoneBurner duplicate handling. Default "update". */
-  onDuplicate?: "skip" | "update";
-  /** Validate + scrub + resolve, but create nothing. Default false. */
+  dncScrub?: boolean; // default true
+  onDuplicate?: "skip" | "update"; // default "update" (so existing contacts gain the new tag)
   dryRun?: boolean;
 }
 
@@ -81,13 +80,17 @@ export interface UploadResult {
   clientId: string;
   clientName: string;
   sdr: SdrOption;
-  folder: { id: string; name: string; created: boolean } | null;
+  clientTag: string;
+  leadScore: { value: string; prefix: string; seq: number; issued: boolean } | null;
   tags: string[];
+  dnc: { scrubbed: boolean; entries_present: boolean; skipped: number };
   totals: {
     received: number;
     invalid: number;
     dnc_skipped: number;
     attempted: number;
+    net_new: number | null;
+    overlap: number | null;
     uploaded: number;
     failed: number;
   };
@@ -106,7 +109,6 @@ export class UploadInputError extends Error {
 
 // ── SDR resolution ───────────────────────────────────────────────────────────
 
-/** pb_member_id → display name/username, from the committed registry. */
 function registryNameIndex(): Map<string, { name: string | null; username: string | null }> {
   const index = new Map<string, { name: string | null; username: string | null }>();
   try {
@@ -122,11 +124,6 @@ function registryNameIndex(): Map<string, { name: string | null; username: strin
   return index;
 }
 
-/**
- * The active PhoneBurner members assigned to a client, each with a stable slug
- * (unique within the client). Names come from the registry; the DB only holds
- * the member id + email.
- */
 export async function resolveClientSdrs(client: Client): Promise<SdrOption[]> {
   const members = await prisma.phoneburnerMember.findMany({
     where: { client_id: client.id, active: true },
@@ -141,12 +138,9 @@ export async function resolveClientSdrs(client: Client): Promise<SdrOption[]> {
     const reg = nameIndex.get(m.pb_member_id);
     const username = reg?.username ?? m.pb_username ?? null;
     const name =
-      reg?.name?.trim() ||
-      (username ? username.split("@")[0] : null) ||
-      `SDR ${m.pb_member_id}`;
+      reg?.name?.trim() || (username ? username.split("@")[0] : null) || `SDR ${m.pb_member_id}`;
 
     let slug = slugify(name) || `sdr-${m.pb_member_id}`;
-    // Disambiguate collisions within the client (e.g. two "Sara Johnson"s).
     if (usedSlugs.has(slug)) slug = `${slug}-${m.pb_member_id.slice(-4)}`;
     usedSlugs.add(slug);
 
@@ -154,17 +148,10 @@ export async function resolveClientSdrs(client: Client): Promise<SdrOption[]> {
   });
 }
 
-/**
- * Pick the SDR to upload to. With one assigned SDR, `query` is optional. With
- * more than one, `query` must match a slug / name / email / member id — else an
- * UploadInputError(400) carrying the full option list is thrown so the caller
- * can prompt for a choice.
- */
 export function selectSdr(sdrs: SdrOption[], query?: string): SdrOption {
   if (sdrs.length === 0) {
     throw new UploadInputError("No active PhoneBurner SDRs are assigned to this client", 400);
   }
-
   const q = (query ?? "").trim();
   if (!q) {
     if (sdrs.length === 1) return sdrs[0];
@@ -173,7 +160,6 @@ export function selectSdr(sdrs: SdrOption[], query?: string): SdrOption {
       sdrs,
     });
   }
-
   const ql = q.toLowerCase();
   const qslug = slugify(q);
   const match = sdrs.find(
@@ -184,19 +170,26 @@ export function selectSdr(sdrs: SdrOption[], query?: string): SdrOption {
       s.name.toLowerCase() === ql ||
       (s.username ?? "").toLowerCase() === ql
   );
-  if (!match) {
-    throw new UploadInputError(`No assigned SDR matches "${q}"`, 400, { needs_sdr: true, sdrs });
-  }
+  if (!match) throw new UploadInputError(`No assigned SDR matches "${q}"`, 400, { needs_sdr: true, sdrs });
   return match;
 }
 
-// ── PhoneBurner REST helpers (create-side; reads/deletes live in phoneburner.service) ─
+// ── Client tag ────────────────────────────────────────────────────────────────
+
+/** PascalCase fallback client tag from the client name (used only until the
+ *  backfill sets `pb_client_tag` from real call history). "Club Hub" → "ClubHub". */
+export function deriveClientTag(name: string): string {
+  const tag = name
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join("");
+  return tag || name.trim();
+}
+
+// ── PhoneBurner REST helpers (create-side) ─────────────────────────────────────
 
 type TokenGetter = (force?: boolean) => Promise<string>;
-
-function makeThrottle(): () => Promise<void> {
-  return createThrottle(UPLOAD_SPACING_MS);
-}
 
 async function pbUploadFetch(
   path: string,
@@ -220,60 +213,6 @@ async function pbUploadFetch(
   );
 }
 
-interface PbFolder {
-  id: string;
-  name: string;
-}
-
-/** A PhoneBurner folder leaf: has a folder_id (or duplicated `id`) + folder_name. */
-function isFolderLeaf(o: any): boolean {
-  return !!o && typeof o === "object" && (o.folder_id !== undefined || o.folder_name !== undefined);
-}
-function folderOf(o: any): PbFolder | null {
-  const id = o?.folder_id ?? o?.id;
-  const name = o?.folder_name ?? o?.name;
-  if (id === undefined || name === undefined) return null;
-  return { id: String(id), name: String(name) };
-}
-
-/**
- * Find a folder by name (case-insensitive) in the member's book, creating it if
- * absent. `category_id` on a contact == a `folder_id` from here.
- */
-export async function resolveOrCreateFolder(
-  getToken: TokenGetter,
-  name: string,
-  throttle: () => Promise<void>
-): Promise<{ id: string; name: string; created: boolean }> {
-  const listed = await pbUploadFetch(`/folders?page_size=300`, getToken, { method: "GET" }, throttle);
-  if (listed.ok) {
-    const json: any = await listed.json().catch(() => ({}));
-    const env = json?.folders ?? json;
-    const folders = flattenPbCollection(env?.folders ?? env?.data ?? env, isFolderLeaf)
-      .map(folderOf)
-      .filter((f): f is PbFolder => !!f);
-    const hit = folders.find((f) => f.name.trim().toLowerCase() === name.trim().toLowerCase());
-    if (hit) return { ...hit, created: false };
-  }
-
-  const created = await pbUploadFetch(
-    `/folders`,
-    getToken,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) },
-    throttle
-  );
-  if (!created.ok) {
-    const body = await created.text().catch(() => "");
-    throw new Error(`PhoneBurner POST /folders failed: HTTP ${created.status} ${body.slice(0, 300)}`);
-  }
-  const json: any = await created.json().catch(() => ({}));
-  const [leaf] = flattenPbCollection(json?.folder ?? json?.folders ?? json, isFolderLeaf);
-  const folder = folderOf(leaf);
-  if (!folder) throw new Error(`PhoneBurner POST /folders returned no folder id (name "${name}")`);
-  return { ...folder, created: true };
-}
-
-/** A single normalized lead ready to POST. */
 interface NormalizedContact {
   phoneE164: string;
   firstName: string;
@@ -295,24 +234,29 @@ async function createPbContact(
   getToken: TokenGetter,
   ownerId: string,
   c: NormalizedContact,
-  opts: { tags: string[]; categoryId: string | null; onDuplicate: "skip" | "update" },
+  opts: { tags: string[]; leadScore: string | null; onDuplicate: "skip" | "update" },
   throttle: () => Promise<void>
 ): Promise<CreateContactResult> {
+  // Custom fields MUST be the array shape; a dict silently persists nothing.
+  const customFields: Array<{ name: string; type: number; value: string }> = [];
+  if (c.title) customFields.push({ name: JOB_TITLE_FIELD, type: CF_TYPE_TEXT, value: c.title });
+  // Lead Score is set ONLY for net-new contacts (caller passes null for merges)
+  // so an overlapping contact keeps its prior list's Lead Score.
+  if (opts.leadScore) customFields.push({ name: LEAD_SCORE_FIELD, type: CF_TYPE_TEXT, value: opts.leadScore });
+
   const body: Record<string, unknown> = {
     owner_id: ownerId,
     first_name: c.firstName,
     last_name: c.lastName,
     phone: c.phoneE164,
-    phone_type: 1, // Home — mirrors the manual import's "home" dial number
+    phone_type: 1, // Home — mirrors the manual import's dial number
     on_duplicate: opts.onDuplicate,
     tags: opts.tags,
   };
   if (c.email) body.email = c.email;
   if (c.company) body.company = c.company;
   if (c.notes) body.notes = c.notes;
-  if (opts.categoryId) body.category_id = opts.categoryId;
-  // Job title has no dedicated create field — carry it as a text custom field.
-  if (c.title) body.custom_fields = [{ name: "Title", type: 1, value: c.title }];
+  if (customFields.length) body.custom_fields = customFields;
 
   const res = await pbUploadFetch(
     `/contacts`,
@@ -324,18 +268,15 @@ async function createPbContact(
   if (res.ok || res.status === 201) {
     const json: any = await res.json().catch(() => ({}));
     const env = json?.contact ?? json?.contacts ?? json;
-    const id =
-      env?.contact_user_id ?? env?.user_id ?? env?.id ?? null;
+    const id = env?.contact_user_id ?? env?.user_id ?? env?.id ?? null;
     return { ok: true, status: res.status, id: id != null ? String(id) : null, error: null };
   }
-
   const text = await res.text().catch(() => "");
   return { ok: false, status: res.status, id: null, error: text.slice(0, 300) || `HTTP ${res.status}` };
 }
 
-// ── Normalization ──────────────────────────────────────────────────────────
+// ── Normalization + net-new detection ─────────────────────────────────────────
 
-/** Coerce a raw row (string or object) into a normalized contact, or an error. */
 function normalizeContact(raw: UploadContactInput | string): NormalizedContact | { error: string } {
   const row: UploadContactInput = typeof raw === "string" ? { phone: raw } : raw ?? {};
 
@@ -344,7 +285,6 @@ function normalizeContact(raw: UploadContactInput | string): NormalizedContact |
   const parsed = normalizePhone(rawPhone);
   if (!parsed) return { error: `unparseable phone: ${rawPhone}` };
 
-  // Derive first/last from a combined `name` when explicit fields are absent.
   let firstName = (row.first_name ?? "").toString().trim();
   let lastName = (row.last_name ?? "").toString().trim();
   if (!firstName && !lastName && row.name) {
@@ -352,8 +292,6 @@ function normalizeContact(raw: UploadContactInput | string): NormalizedContact |
     firstName = parts.shift() ?? "";
     lastName = parts.join(" ");
   }
-  // PhoneBurner wants a name on the record — fall back so a phone-only row still
-  // imports (identifiable by the last 4 digits) instead of 400-ing.
   if (!firstName) firstName = "Lead";
   if (!lastName) lastName = `#${parsed.national.slice(-4)}`;
 
@@ -370,13 +308,42 @@ function normalizeContact(raw: UploadContactInput | string): NormalizedContact |
   };
 }
 
+/** Normalized email+phone keys already present in the seat's book, for net-new
+ *  detection. Returns null if the book couldn't be read (token/API-access), in
+ *  which case we can't distinguish net-new from overlap. */
+async function snapshotBookKeys(
+  memberId: string,
+  getToken: TokenGetter,
+  throttle: () => Promise<void>
+): Promise<Set<string> | null> {
+  try {
+    const contacts = await fetchMemberContacts(memberId, getToken, undefined, { throttle });
+    const keys = new Set<string>();
+    for (const c of contacts) {
+      for (const e of c.emails) {
+        const n = normalizeEmail(e);
+        if (n) keys.add(`e:${n}`);
+      }
+      for (const p of c.phones) {
+        const n = normalizePhone(p)?.e164;
+        if (n) keys.add(`p:${n}`);
+      }
+    }
+    return keys;
+  } catch (e) {
+    if (e instanceof PhoneburnerAccessError) return null;
+    throw e;
+  }
+}
+
+function contactKeys(c: NormalizedContact): string[] {
+  const keys = [`p:${c.phoneE164}`];
+  if (c.email) keys.push(`e:${c.email}`);
+  return keys;
+}
+
 // ── Orchestration ────────────────────────────────────────────────────────────
 
-/**
- * Upload `contacts` into `sdr`'s PhoneBurner book for `client`. Assumes the SDR
- * has already been resolved/selected. Scrubs DNC (unless disabled), resolves the
- * folder, then creates the surviving contacts with bounded concurrency.
- */
 export async function uploadContacts(
   client: Client,
   sdr: SdrOption,
@@ -387,16 +354,24 @@ export async function uploadContacts(
   const onDuplicate = options.onDuplicate === "skip" ? "skip" : "update";
   const dryRun = options.dryRun === true;
 
-  // Tags: client tag + campaign + attempt + any extras (client + campaign was
-  // the chosen split; the lead-group id becomes the folder below).
+  const clientTag = client.pb_client_tag?.trim() || deriveClientTag(client.name);
+  const campaign = options.campaign?.toString().trim() || null;
+
+  // Tags: bare client tag + "<ClientTag>: <Campaign>" + attempt + extras.
   const tags = Array.from(
     new Set(
-      [client.name, options.campaign, options.attempt, ...(options.tags ?? [])]
+      [
+        clientTag,
+        campaign ? `${clientTag}: ${campaign}` : null,
+        options.attempt,
+        ...(options.tags ?? []),
+      ]
         .map((t) => (t ?? "").toString().trim())
         .filter(Boolean)
     )
   );
 
+  // Normalize rows.
   const invalid: UploadResult["invalid"] = [];
   const normalized: NormalizedContact[] = [];
   for (const raw of contacts) {
@@ -405,24 +380,17 @@ export async function uploadContacts(
     else normalized.push(n);
   }
 
-  // DNC scrub — drop anything already suppressed for this client.
+  // DNC scrub.
+  const dncEntriesPresent = (await prisma.dncEntry.count({ where: { client_id: client.id } })) > 0;
   const dncSkipped: UploadResult["dnc_skipped"] = [];
   let survivors = normalized;
   if (dncScrub && normalized.length > 0) {
     const kept: NormalizedContact[] = [];
     for (const c of normalized) {
-      const ids = normalizeCheckIdentifiers({
-        email: c.email ?? undefined,
-        phone: c.phoneE164,
-      });
+      const ids = normalizeCheckIdentifiers({ email: c.email ?? undefined, phone: c.phoneE164 });
       const match = await dncService.findMatch(client.id, ids);
       if (match) {
-        dncSkipped.push({
-          phone: c.phoneE164,
-          email: c.email,
-          matched_on: match.matchedOn,
-          matched_value: match.matchedValue,
-        });
+        dncSkipped.push({ phone: c.phoneE164, email: c.email, matched_on: match.matchedOn, matched_value: match.matchedValue });
       } else {
         kept.push(c);
       }
@@ -437,18 +405,35 @@ export async function uploadContacts(
       400
     );
   }
-  const throttle = makeThrottle();
-  const getToken: TokenGetter = async (force) =>
-    (await getMemberToken(sdr.pbMemberId, { force })) ?? "";
+  const throttle = createThrottle(UPLOAD_SPACING_MS);
+  const getToken: TokenGetter = async (force) => (await getMemberToken(sdr.pbMemberId, { force })) ?? "";
 
-  // Resolve the folder (lead-group identifier) unless dry-running.
-  let folder: UploadResult["folder"] = null;
-  if (options.leadGroup && options.leadGroup.trim()) {
-    if (dryRun) {
-      folder = { id: "", name: options.leadGroup.trim(), created: false };
-    } else {
-      folder = await resolveOrCreateFolder(getToken, options.leadGroup.trim(), throttle);
-    }
+  // Resolve the Lead Score: explicit override (recorded), else auto-mint. In a
+  // dry run we only peek (record nothing).
+  let leadScore: UploadResult["leadScore"] = null;
+  if (options.leadScore && options.leadScore.trim()) {
+    const value = options.leadScore.trim();
+    const parsed = value.match(/^(.*?)(\d+)$/);
+    if (!dryRun) await recordLeadScore(client, value, { campaign });
+    leadScore = { value, prefix: parsed?.[1] ?? value, seq: parsed ? Number(parsed[2]) : 0, issued: false };
+  } else {
+    const minted: LeadScore = dryRun
+      ? await peekNextLeadScore(client)
+      : await issueLeadScore(client, { campaign });
+    leadScore = { ...minted, issued: !dryRun };
+  }
+
+  // Snapshot the book for net-new detection (skip if no token available).
+  const bookKeys = token0 ? await snapshotBookKeys(sdr.pbMemberId, getToken, throttle) : null;
+  const isNetNew = (c: NormalizedContact): boolean =>
+    bookKeys ? !contactKeys(c).some((k) => bookKeys.has(k)) : true;
+
+  let netNew: number | null = bookKeys ? 0 : null;
+  let overlap: number | null = bookKeys ? 0 : null;
+  for (const c of survivors) {
+    if (!bookKeys) break;
+    if (isNetNew(c)) netNew!++;
+    else overlap!++;
   }
 
   const failed: UploadResult["failed"] = [];
@@ -460,7 +445,13 @@ export async function uploadContacts(
         getToken,
         sdr.pbMemberId,
         c,
-        { tags, categoryId: folder?.id || null, onDuplicate },
+        {
+          tags,
+          // Lead Score only on net-new (or when we couldn't read the book, in
+          // which case we fall back to stamping all — matches prior behavior).
+          leadScore: isNetNew(c) ? leadScore!.value : null,
+          onDuplicate,
+        },
         throttle
       ).then((r) => ({ c, r }))
     );
@@ -475,13 +466,17 @@ export async function uploadContacts(
     clientId: client.external_id,
     clientName: client.name,
     sdr,
-    folder,
+    clientTag,
+    leadScore,
     tags,
+    dnc: { scrubbed: dncScrub, entries_present: dncEntriesPresent, skipped: dncSkipped.length },
     totals: {
       received: contacts.length,
       invalid: invalid.length,
       dnc_skipped: dncSkipped.length,
       attempted: survivors.length,
+      net_new: netNew,
+      overlap,
       uploaded,
       failed: failed.length,
     },
