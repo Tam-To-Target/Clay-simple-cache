@@ -282,13 +282,21 @@ async function fetchListMemberIds(
   return ids;
 }
 
-/** Batch-read contacts to get email + phone for the given record IDs. */
-async function fetchContactProps(
+/**
+ * Generic batch-read helper: given arbitrary contact record IDs and a set of
+ * property names, returns a map of id -> properties (raw HubSpot values,
+ * `null` where a property is unset). Chunks requests at `BATCH_READ_SIZE`.
+ *
+ * Returns an empty Map (no HTTP call) when `ids` is empty.
+ */
+export async function batchReadContactProperties(
   tokenProvider: TokenProvider,
   ids: string[],
+  properties: string[],
   opts?: HsCallOpts
-): Promise<HubspotListContact[]> {
-  const out: HubspotListContact[] = [];
+): Promise<Map<string, Record<string, string | null>>> {
+  const out = new Map<string, Record<string, string | null>>();
+  if (ids.length === 0) return out;
 
   for (let i = 0; i < ids.length; i += BATCH_READ_SIZE) {
     const batch = ids.slice(i, i + BATCH_READ_SIZE);
@@ -298,7 +306,7 @@ async function fetchContactProps(
       {
         method: "POST",
         body: JSON.stringify({
-          properties: ["email", "phone", "hs_email_domain"],
+          properties,
           inputs: batch.map((id) => ({ id })),
         }),
       },
@@ -312,13 +320,34 @@ async function fetchContactProps(
 
     const json = (await res.json()) as BatchReadResponse;
     for (const r of json.results || []) {
-      out.push({
-        hubspot_id: r.id,
-        email: r.properties?.email ?? null,
-        phone: r.properties?.phone ?? null,
-        email_domain: r.properties?.hs_email_domain ?? null,
-      });
+      out.set(r.id, r.properties ?? {});
     }
+  }
+
+  return out;
+}
+
+/** Batch-read contacts to get email + phone for the given record IDs. */
+async function fetchContactProps(
+  tokenProvider: TokenProvider,
+  ids: string[],
+  opts?: HsCallOpts
+): Promise<HubspotListContact[]> {
+  const propsById = await batchReadContactProperties(
+    tokenProvider,
+    ids,
+    ["email", "phone", "hs_email_domain"],
+    opts
+  );
+
+  const out: HubspotListContact[] = [];
+  for (const [id, properties] of propsById) {
+    out.push({
+      hubspot_id: id,
+      email: properties.email ?? null,
+      phone: properties.phone ?? null,
+      email_domain: properties.hs_email_domain ?? null,
+    });
   }
 
   return out;

@@ -32,6 +32,17 @@ import {
   PhoneburnerAccessError,
   PbContact,
 } from "./phoneburner.service";
+import {
+  ProtectCandidate,
+  ProtectContactsFn,
+  loadMeetingProtectedContactIds,
+  meetingProtectionConfigFromEnv,
+} from "./meeting-protection.service";
+import { sendRatioCeilingAlert } from "./slack-alert";
+
+/** No-op protection — used whenever `PurgeContext.protectContacts` is absent
+ * or the meeting-protection feature is disabled. Protects nothing. */
+const NOOP_PROTECT: ProtectContactsFn = async () => ({ protectedIds: new Set<string>(), readErrors: 0 });
 
 export interface PurgeOptions {
   dryRun: boolean;
@@ -68,8 +79,14 @@ export interface MemberPurgeResult {
   failed: number;
   /** Contacts on this client's DNC but kept because another client the member serves still wants them. */
   protected_other_client?: number;
+  /** Contacts kept because their HubSpot contact has a future/recent meeting date (see MEETING_PROTECTION_PLAN.md). */
+  protected_recent_meeting?: number;
+  /** Contacts fail-closed protected because the meeting-date HubSpot read failed (counted so a persistent config error is visible). */
+  protected_read_errors?: number;
   /** Which purge path actually ran for this member. */
   mode?: "full" | "targeted";
+  /** The collision ratio the safety gate computed — only set when status is "aborted_ratio". */
+  ratio?: number;
   /** Index rows removed because the live PB contact no longer exists (stale index entry). */
   stale_index?: number;
   error?: string;
@@ -330,7 +347,8 @@ export async function purgeMember(
   guardSets: DncSets[],
   opts: PurgeOptions,
   runId: string | null,
-  counters: RunCounters
+  counters: RunCounters,
+  protect: ProtectContactsFn = NOOP_PROTECT
 ): Promise<MemberPurgeResult> {
   const base: MemberPurgeResult = {
     pb_member_id: member.pb_member_id,
@@ -405,10 +423,24 @@ export async function purgeMember(
     // The scan happened and the index was rebuilt above; do NOT advance the
     // watermark — these entries were never actually collided-and-cleared.
     await touchMember(member.id, { api_access_ok: true, last_full_scan_at: scanStartedAt });
-    return { ...base, status: "aborted_ratio" };
+    return { ...base, status: "aborted_ratio", ratio: collisions.length / contacts.length };
   }
 
-  for (const { contact, match } of collisions) {
+  // Meeting-protection gate (see MEETING_PROTECTION_PLAN.md): delay the delete
+  // for any colliding contact whose HubSpot record has a future/recent meeting
+  // date. Runs AFTER the ratio gate (which stays computed on raw collisions)
+  // and BEFORE the delete loop.
+  const candidates: ProtectCandidate[] = collisions.map(({ contact }) => ({
+    pbContactId: contact.id,
+    emails: contact.emails.map((e) => normalizeEmail(e)).filter((e): e is string => Boolean(e)),
+    phones: contact.phones.map((p) => normalizePhone(p)?.e164).filter((p): p is string => Boolean(p)),
+  }));
+  const { protectedIds, readErrors } = await protect(client, candidates);
+  const toDelete = collisions.filter((c) => !protectedIds.has(c.contact.id));
+  if (protectedIds.size) base.protected_recent_meeting = collisions.length - toDelete.length;
+  if (readErrors) base.protected_read_errors = readErrors;
+
+  for (const { contact, match } of toDelete) {
     if (opts.maxDeletesPerRun !== null && counters.deletedThisRun >= opts.maxDeletesPerRun) {
       base.status = "capped";
       break;
@@ -620,6 +652,7 @@ export async function targetedPurgeMember(
       status: "aborted_ratio",
       collisions: candidatesAfterGuard.length,
       protected_other_client: protectedByOtherClient || undefined,
+      ratio,
     };
   }
 
@@ -628,6 +661,30 @@ export async function targetedPurgeMember(
 
   // Nothing survived the guard — clean completion, nothing to verify/delete.
   if (candidatesAfterGuard.length === 0) {
+    await touchMember(member.id, { api_access_ok: member.api_access_ok, dnc_processed_through: maxCreatedAt });
+    return base;
+  }
+
+  const protect = ctx.protectContacts ?? NOOP_PROTECT;
+
+  // Meeting-protection gate (see MEETING_PROTECTION_PLAN.md). Identifiers in
+  // the identity index (`profiles`) are ALREADY normalized — do not
+  // re-normalize. The watermark still advances normally afterward (the
+  // full-scan path is the authoritative backstop that eventually deletes a
+  // contact once its protection window expires — see the plan).
+  const protectCandidates: ProtectCandidate[] = candidatesAfterGuard.map((contactId) => ({
+    pbContactId: contactId,
+    emails: [...(profiles.get(contactId)?.emails ?? [])],
+    phones: [...(profiles.get(contactId)?.phones ?? [])],
+  }));
+  const { protectedIds, readErrors } = await protect(client, protectCandidates);
+  const survivors = candidatesAfterGuard.filter((id) => !protectedIds.has(id));
+  if (protectedIds.size) base.protected_recent_meeting = candidatesAfterGuard.length - survivors.length;
+  if (readErrors) base.protected_read_errors = readErrors;
+
+  // Everything survived the guard but was then protected — clean completion,
+  // nothing left to verify/delete this run.
+  if (survivors.length === 0) {
     await touchMember(member.id, { api_access_ok: member.api_access_ok, dnc_processed_through: maxCreatedAt });
     return base;
   }
@@ -647,7 +704,7 @@ export async function targetedPurgeMember(
   const throttle = pbThrottleFor(member.pb_member_id);
 
   let staleIndex = 0;
-  for (const contactId of candidatesAfterGuard) {
+  for (const contactId of survivors) {
     let live: PbContact | null;
     try {
       live = await fetchPbContact(contactId, getToken, { throttle });
@@ -756,6 +813,9 @@ export interface PurgeContext {
   getSets: (clientId: string) => Promise<DncSets>;
   /** Every client id a PhoneBurner member dials for (across ALL active clients). */
   servingClientIds: (pbMemberId: string) => string[];
+  /** Meeting-protection gate (see MEETING_PROTECTION_PLAN.md). Optional — absent
+   * OR the disabled feature both mean "no protection" (NOOP_PROTECT is used). */
+  protectContacts?: ProtectContactsFn;
 }
 
 /** Decide + run the right purge path for one member per `opts.mode`. */
@@ -771,7 +831,7 @@ async function purgeMemberDispatch(
   const runFull = async (): Promise<MemberPurgeResult> => {
     const servingIds = ctx.servingClientIds(member.pb_member_id);
     const guardSets = await Promise.all((servingIds.length ? servingIds : [client.id]).map(ctx.getSets));
-    return purgeMember(client, member, sets, guardSets, opts, runId, counters);
+    return purgeMember(client, member, sets, guardSets, opts, runId, counters, ctx.protectContacts ?? NOOP_PROTECT);
   };
 
   if (opts.mode === "full") return runFull();
@@ -856,6 +916,10 @@ export interface PurgeRunSummary {
     failed: number;
     /** Contacts on a client's DNC kept because another client the member serves still wants them. */
     protected_other_client: number;
+    /** Contacts kept because of a future/recent meeting date (see MEETING_PROTECTION_PLAN.md). */
+    protected_recent_meeting: number;
+    /** Contacts fail-closed protected because the meeting-date HubSpot read failed. */
+    protected_read_errors: number;
     /** In-memory only — not persisted as PhoneburnerPurgeRun columns, see `notes`. */
     targeted_members: number;
     full_scan_members: number;
@@ -883,10 +947,14 @@ function logClientResult(c: ClientPurgeResult, dryRun: boolean): void {
   const failed = c.members.reduce((n, m) => n + m.failed, 0);
   const scanned = c.members.reduce((n, m) => n + m.contacts_scanned, 0);
   const skipped = c.members.filter((m) => SKIPPED.includes(m.status)).length;
+  const protRM = c.members.reduce((n, m) => n + (m.protected_recent_meeting ?? 0), 0);
+  const protReadErrors = c.members.reduce((n, m) => n + (m.protected_read_errors ?? 0), 0);
   const extra = [
     `scanned ${scanned}`,
     failed ? `${failed} failed` : "",
     skipped ? `${skipped} member(s) skipped` : "",
+    protRM ? `${protRM} meeting-protected` : "",
+    protReadErrors ? `${protReadErrors} meeting-protection read error(s)` : "",
   ]
     .filter(Boolean)
     .join(", ");
@@ -930,12 +998,14 @@ export async function runPurge(
     servingMap.set(m.pb_member_id, arr);
   }
   const setsCache = new Map<string, DncSets>();
+  const meetingCfg = meetingProtectionConfigFromEnv();
   const ctx: PurgeContext = {
     getSets: async (cid) => {
       if (!setsCache.has(cid)) setsCache.set(cid, await loadDncSets(cid));
       return setsCache.get(cid)!;
     },
     servingClientIds: (pid) => servingMap.get(pid) ?? [],
+    protectContacts: (client, candidates) => loadMeetingProtectedContactIds(client, candidates, meetingCfg),
   };
 
   // Dry-run rows are informational; clear the prior dry-run's rows for the
@@ -986,6 +1056,8 @@ export async function runPurge(
     deleted: allMembers.reduce((n, m) => n + m.deleted, 0),
     failed: allMembers.reduce((n, m) => n + m.failed, 0),
     protected_other_client: allMembers.reduce((n, m) => n + (m.protected_other_client ?? 0), 0),
+    protected_recent_meeting: allMembers.reduce((n, m) => n + (m.protected_recent_meeting ?? 0), 0),
+    protected_read_errors: allMembers.reduce((n, m) => n + (m.protected_read_errors ?? 0), 0),
     targeted_members: allMembers.filter((m) => m.mode === "targeted").length,
     full_scan_members: allMembers.filter((m) => m.mode === "full").length,
   };
@@ -1010,6 +1082,8 @@ export async function runPurge(
           totals.protected_other_client
             ? `${totals.protected_other_client} contact(s) kept (shared-book, wanted by another client)`
             : null,
+          totals.protected_recent_meeting ? `${totals.protected_recent_meeting} kept (recent meeting)` : null,
+          totals.protected_read_errors ? `${totals.protected_read_errors} read error(s)` : null,
           `${totals.full_scan_members} full-scan, ${totals.targeted_members} targeted member run(s)`,
         ]
           .filter(Boolean)
@@ -1017,5 +1091,18 @@ export async function runPurge(
     },
   });
 
-  return { run_id: run.id, dry_run: opts.dryRun, clients: clientResults, totals, status };
+  const summary: PurgeRunSummary = {
+    run_id: run.id,
+    dry_run: opts.dryRun,
+    clients: clientResults,
+    totals,
+    status,
+  };
+
+  // Alert the team whenever the hard collision-ratio ceiling aborted any SDR's
+  // book (dry-run or live) — surfaces over-broad DNC lists / suppressed-account
+  // dialing for review. Never throws; no-op when nothing hit the ceiling.
+  await sendRatioCeilingAlert(summary, opts.maxRatio);
+
+  return summary;
 }

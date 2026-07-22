@@ -408,6 +408,80 @@ describe("purgeMember", () => {
     expect(data.last_full_scan_at).toBeInstanceOf(Date);
     expect(data.dnc_processed_through).toBeUndefined();
   });
+
+  // ── Meeting protection (Piece 3, see MEETING_PROTECTION_PLAN.md) ──────────
+
+  describe("meeting protection", () => {
+    const solo2 = (s: DncSets) => [s];
+
+    it("skips a protected contact's delete, drops it from `deleted`, and sets protected_recent_meeting", async () => {
+      const liveOpts = { ...OPTS, dryRun: false };
+      tokenMock.mockResolvedValue("tok");
+      // 2 colliding contacts, 2 safe -> ratio 2/4 = 0.5... use a wider maxRatio.
+      const wideOpts = { ...liveOpts, maxRatio: 0.6 };
+      fetchMock.mockResolvedValue([
+        contact({ id: "c1", emails: ["a@b.com"] }),
+        contact({ id: "c2", emails: ["c2@b.com"] }),
+        contact({ id: "c3", emails: ["safe@x.com"] }),
+        contact({ id: "c4", emails: ["safe2@x.com"] }),
+      ]);
+      deleteMock.mockResolvedValue({ ok: true, status: 204, alreadyGone: false });
+      const s = sets(["a@b.com", "c2@b.com"], [], []);
+      const protect = vi.fn().mockResolvedValue({ protectedIds: new Set(["c2"]), readErrors: 0 });
+      const r = await purgeMember(CLIENT, MEMBER, s, solo2(s), wideOpts, "run1", counters(), protect);
+
+      expect(r.collisions).toBe(2); // raw collision count, pre-protection
+      expect(r.deleted).toBe(1);
+      expect(r.protected_recent_meeting).toBe(1);
+      expect(deleteMock).toHaveBeenCalledTimes(1);
+      expect(deleteMock).toHaveBeenCalledWith("c1", expect.any(Function), expect.any(Object));
+      expect(deleteMock).not.toHaveBeenCalledWith("c2", expect.anything(), expect.anything());
+      expect(protect).toHaveBeenCalledWith(
+        CLIENT,
+        expect.arrayContaining([
+          expect.objectContaining({ pbContactId: "c1" }),
+          expect.objectContaining({ pbContactId: "c2" }),
+        ])
+      );
+    });
+
+    it("default (no protect arg passed): behaves exactly as before — nothing protected", async () => {
+      const liveOpts = { ...OPTS, dryRun: false };
+      tokenMock.mockResolvedValue("tok");
+      fetchMock.mockResolvedValue([
+        contact({ id: "c1", emails: ["a@b.com"] }),
+        contact({ id: "c2", emails: ["safe@x.com"] }),
+        contact({ id: "c3", emails: ["safe2@x.com"] }),
+        contact({ id: "c4", emails: ["safe3@x.com"] }),
+      ]);
+      deleteMock.mockResolvedValue({ ok: true, status: 204, alreadyGone: false });
+      const s = sets(["a@b.com"], [], []);
+      // No 8th arg -> default NOOP_PROTECT.
+      const r = await purgeMember(CLIENT, MEMBER, s, solo2(s), liveOpts, "run1", counters());
+      expect(r.deleted).toBe(1);
+      expect(r.protected_recent_meeting).toBeUndefined();
+      expect(r.protected_read_errors).toBeUndefined();
+      expect(deleteMock).toHaveBeenCalledWith("c1", expect.any(Function), expect.any(Object));
+    });
+
+    it("fail-closed: a protect fn returning readErrors sets protected_read_errors", async () => {
+      const liveOpts = { ...OPTS, dryRun: false };
+      tokenMock.mockResolvedValue("tok");
+      fetchMock.mockResolvedValue([
+        contact({ id: "c1", emails: ["a@b.com"] }),
+        contact({ id: "c2", emails: ["safe@x.com"] }),
+        contact({ id: "c3", emails: ["safe2@x.com"] }),
+        contact({ id: "c4", emails: ["safe3@x.com"] }),
+      ]);
+      const s = sets(["a@b.com"], [], []);
+      const protect = vi.fn().mockResolvedValue({ protectedIds: new Set(["c1"]), readErrors: 1 });
+      const r = await purgeMember(CLIENT, MEMBER, s, solo2(s), liveOpts, "run1", counters(), protect);
+      expect(r.protected_read_errors).toBe(1);
+      expect(r.protected_recent_meeting).toBe(1);
+      expect(r.deleted).toBe(0);
+      expect(deleteMock).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("needsFullScan", () => {
@@ -629,6 +703,82 @@ describe("targetedPurgeMember", () => {
     expect(r.collisions).toBe(0);
     expect(r.protected_other_client).toBe(1);
     expect(fetchPbContactMock).not.toHaveBeenCalled();
+  });
+
+  // ── Meeting protection (Piece 3, see MEETING_PROTECTION_PLAN.md) ──────────
+
+  describe("meeting protection", () => {
+    it("a ctx.protectContacts that protects one candidate excludes it from deletion and sets protected_recent_meeting", async () => {
+      const liveOpts = { ...OPTS, dryRun: false, maxRatio: 0.9 };
+      const createdAt = new Date("2026-07-01T00:00:00Z");
+      mockPrisma.dncEntry.findMany.mockResolvedValue([
+        { email: "new@b.com", phone_e164: null, domain: null, created_at: createdAt },
+      ]);
+      mockIndex({
+        indexedContactIds: ["x1", "x2"],
+        emailHits: ["c1"],
+        profiles: [{ pb_contact_id: "c1", email: "new@b.com", phone_e164: null, domain: null }],
+      });
+      const protect = vi.fn().mockResolvedValue({ protectedIds: new Set(["c1"]), readErrors: 0 });
+      const ctx: PurgeContext = { ...makeCtx({ [CLIENT.id]: sets(["new@b.com"], [], []) }), protectContacts: protect };
+      const m = memberWithWatermark(new Date("2026-01-01"));
+      const r = await targetedPurgeMember(CLIENT, m, liveOpts, "run1", counters(), ctx);
+
+      expect(r.status).toBe("ok");
+      expect(r.collisions).toBe(1); // raw candidate count, pre-protection
+      expect(r.deleted).toBe(0);
+      expect(r.protected_recent_meeting).toBe(1);
+      expect(fetchPbContactMock).not.toHaveBeenCalled();
+      expect(deleteMock).not.toHaveBeenCalled();
+      expect(protect).toHaveBeenCalledWith(CLIENT, [expect.objectContaining({ pbContactId: "c1", emails: ["new@b.com"] })]);
+      // Watermark still advances — the full-scan path is the backstop that
+      // eventually deletes the contact once its protection window expires.
+      const data = mockPrisma.phoneburnerMember.update.mock.calls.at(-1)[0].data;
+      expect(data.dnc_processed_through).toEqual(createdAt);
+    });
+
+    it("a ctx WITHOUT protectContacts deletes normally (absent === no protection)", async () => {
+      const liveOpts = { ...OPTS, dryRun: false, maxRatio: 0.9 };
+      const createdAt = new Date("2026-07-01T00:00:00Z");
+      mockPrisma.dncEntry.findMany.mockResolvedValue([
+        { email: "new@b.com", phone_e164: null, domain: null, created_at: createdAt },
+      ]);
+      mockIndex({
+        indexedContactIds: ["x1", "x2"],
+        emailHits: ["c1"],
+        profiles: [{ pb_contact_id: "c1", email: "new@b.com", phone_e164: null, domain: null }],
+      });
+      tokenMock.mockResolvedValue("tok");
+      fetchPbContactMock.mockResolvedValue(contact({ id: "c1", emails: ["new@b.com"] }));
+      deleteMock.mockResolvedValue({ ok: true, status: 204, alreadyGone: false });
+      const ctx = makeCtx({ [CLIENT.id]: sets(["new@b.com"], [], []) }); // no protectContacts
+      const m = memberWithWatermark(new Date("2026-01-01"));
+      const r = await targetedPurgeMember(CLIENT, m, liveOpts, "run1", counters(), ctx);
+
+      expect(r.deleted).toBe(1);
+      expect(r.protected_recent_meeting).toBeUndefined();
+      expect(deleteMock).toHaveBeenCalledWith("c1", expect.any(Function), expect.any(Object));
+    });
+
+    it("fail-closed: readErrors from ctx.protectContacts sets protected_read_errors", async () => {
+      const liveOpts = { ...OPTS, dryRun: false, maxRatio: 0.9 };
+      mockPrisma.dncEntry.findMany.mockResolvedValue([
+        { email: "new@b.com", phone_e164: null, domain: null, created_at: new Date("2026-07-01T00:00:00Z") },
+      ]);
+      mockIndex({
+        indexedContactIds: ["x1", "x2"],
+        emailHits: ["c1"],
+        profiles: [{ pb_contact_id: "c1", email: "new@b.com", phone_e164: null, domain: null }],
+      });
+      const protect = vi.fn().mockResolvedValue({ protectedIds: new Set(["c1"]), readErrors: 1 });
+      const ctx: PurgeContext = { ...makeCtx({ [CLIENT.id]: sets(["new@b.com"], [], []) }), protectContacts: protect };
+      const m = memberWithWatermark(new Date("2026-01-01"));
+      const r = await targetedPurgeMember(CLIENT, m, liveOpts, "run1", counters(), ctx);
+
+      expect(r.protected_read_errors).toBe(1);
+      expect(r.deleted).toBe(0);
+      expect(fetchPbContactMock).not.toHaveBeenCalled();
+    });
   });
 });
 
