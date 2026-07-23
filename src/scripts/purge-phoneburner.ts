@@ -10,6 +10,10 @@
  *   npm run pb:purge -- --execute       # force real deletes (overrides PB_PURGE_DRY_RUN)
  *   npm run pb:purge -- --mode=targeted # index-only, no full book scans (default: auto)
  *   npm run pb:purge -- --mode=full     # force a full book scan + index rebuild for every member
+ *   npm run pb:purge -- <slug> --override-ratio
+ *                                       # bypass the 30% collision-ratio ceiling for ONE client
+ *                                       # (confirmed-heavy books, e.g. studentbridge). Requires a
+ *                                       # slug; combine with --execute to actually delete.
  */
 import dotenv from "dotenv";
 dotenv.config();
@@ -39,16 +43,27 @@ async function main() {
   if (modeArg && !mode) {
     throw new Error(`Invalid --mode="${modeArg}" — expected auto|full|targeted`);
   }
+  const overrideRatio = args.includes("--override-ratio");
   const slug = args.find((a) => !a.startsWith("--"));
+
+  // The ceiling override is a single-client escape hatch — refuse it without a slug.
+  if (overrideRatio && !slug) {
+    throw new Error(
+      "--override-ratio requires a client slug (e.g. `pb:purge -- studentbridge --override-ratio --execute`) — " +
+        "it will not bypass the ratio ceiling for an all-clients run"
+    );
+  }
 
   const opts = purgeOptionsFromEnv({
     dryRun: forceExecute ? false : forceDry ? true : undefined,
     mode,
+    overrideRatioCeiling: overrideRatio,
   });
 
   console.log(
     `Starting PhoneBurner purge — ${opts.dryRun ? "DRY-RUN (no deletes)" : "LIVE (deletes enabled)"}` +
       `${slug ? ` for client "${slug}"` : ""}, mode=${opts.mode}, maxRatio=${opts.maxRatio}, domains=${opts.includeDomains}` +
+      `${opts.overrideRatioCeiling ? ", RATIO-CEILING OVERRIDDEN" : ""}` +
       `${opts.maxDeletesPerRun ? `, cap=${opts.maxDeletesPerRun}` : ""}…`
   );
 

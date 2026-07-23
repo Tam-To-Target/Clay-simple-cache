@@ -17,6 +17,13 @@
  * pre-delete snapshot audit row in `phoneburner_deletions`, HARD_MAX_RATIO=0.3
  * collision ratio gate, optional per-run delete cap, shared-book guard (only
  * delete a contact when EVERY client the member dials for suppresses it).
+ *
+ * Ratio-ceiling override: the collision-ratio gate can be explicitly bypassed
+ * for a KNOWN-heavy client (e.g. StudentBridge, which dials a deliberately
+ * suppressed segment) via `PurgeOptions.overrideRatioCeiling`. It is opt-in
+ * per-invocation, is refused unless a single client slug is targeted (see
+ * `runPurge`), and loosens ONLY the ratio gate — every other safety above still
+ * applies. See docs/PHONEBURNER_DNC_PURGE_PLAN.md → "Ratio-ceiling override".
  */
 
 import prisma from "../db/prisma";
@@ -56,6 +63,16 @@ export interface PurgeOptions {
    * otherwise targeted; targeted "no index yet" falls back to a full scan.
    */
   mode: "auto" | "full" | "targeted";
+  /**
+   * Bypass the collision-ratio safety gate (HARD_MAX_RATIO). Opt-in, per-run,
+   * and refused unless a single client slug is targeted (`runPurge` throws
+   * otherwise) — deliberately NOT sourced from an env var, so it can never
+   * silently disable the ceiling for the nightly all-clients cron. Use it for a
+   * client whose book is heavily-suppressed by design (e.g. StudentBridge) when
+   * you have confirmed the suppression is intended. Loosens ONLY this gate;
+   * shared-book guard, meeting-protection, dry-run and audit rows still apply.
+   */
+  overrideRatioCeiling: boolean;
 }
 
 export type MemberStatus =
@@ -110,7 +127,8 @@ export interface DncSets {
  * client is running a legitimate campaign INTO a heavily-suppressed segment
  * (e.g. StudentBridge, ~82% on DNC by design), as well as a corrupt/over-broad
  * DNC sync. PB_PURGE_MAX_RATIO may set a STRICTER (lower) gate, but can never
- * raise it above this ceiling.
+ * raise it above this ceiling. The ONLY way past it is the explicit,
+ * single-client `overrideRatioCeiling` escape hatch (see PurgeOptions).
  */
 export const HARD_MAX_RATIO = 0.3;
 
@@ -132,6 +150,8 @@ export function purgeOptionsFromEnv(overrides?: Partial<PurgeOptions>): PurgeOpt
     includeDomains: overrides?.includeDomains ?? process.env.PB_PURGE_INCLUDE_DOMAINS !== "false",
     maxDeletesPerRun: overrides?.maxDeletesPerRun ?? (Number.isFinite(cap) && cap > 0 ? cap : null),
     mode: overrides?.mode ?? "auto",
+    // Never from env — must be an explicit per-invocation decision (see PurgeOptions).
+    overrideRatioCeiling: overrides?.overrideRatioCeiling ?? false,
   };
 }
 
@@ -419,11 +439,19 @@ export async function purgeMember(
   // a suppressed segment or a corrupt/over-broad DNC sync, NOT a normally dirty
   // book. Abort this member's deletes entirely; surface for review. Never purge
   // most of a book. (opts.maxRatio is clamped to HARD_MAX_RATIO upstream.)
-  if (contacts.length > 0 && collisions.length / contacts.length > opts.maxRatio) {
-    // The scan happened and the index was rebuilt above; do NOT advance the
-    // watermark — these entries were never actually collided-and-cleared.
-    await touchMember(member.id, { api_access_ok: true, last_full_scan_at: scanStartedAt });
-    return { ...base, status: "aborted_ratio", ratio: collisions.length / contacts.length };
+  // `overrideRatioCeiling` bypasses this one gate for a confirmed-heavy client.
+  const rawRatio = contacts.length > 0 ? collisions.length / contacts.length : 0;
+  if (contacts.length > 0 && rawRatio > opts.maxRatio) {
+    if (!opts.overrideRatioCeiling) {
+      // The scan happened and the index was rebuilt above; do NOT advance the
+      // watermark — these entries were never actually collided-and-cleared.
+      await touchMember(member.id, { api_access_ok: true, last_full_scan_at: scanStartedAt });
+      return { ...base, status: "aborted_ratio", ratio: rawRatio };
+    }
+    console.warn(
+      `[purge] ratio ceiling OVERRIDDEN for ${client.external_id}/${member.pb_member_id}: ` +
+        `${(rawRatio * 100).toFixed(1)}% on DNC (> ${(opts.maxRatio * 100).toFixed(1)}% ceiling) — proceeding with deletes`
+    );
   }
 
   // Meeting-protection gate (see MEETING_PROTECTION_PLAN.md): delay the delete
@@ -643,17 +671,23 @@ export async function targetedPurgeMember(
   // DNC diff nuke a large fraction of a shared book.
   const ratio = candidatesAfterGuard.length / Math.max(1, indexedContactCount);
   if (ratio > opts.maxRatio) {
-    // No API calls were made to reach this decision — retain whatever
-    // api_access_ok already said; only bump last_run_at for observability.
-    // Watermark deliberately NOT advanced — these entries were never cleared.
-    await touchMember(member.id, { api_access_ok: member.api_access_ok });
-    return {
-      ...base,
-      status: "aborted_ratio",
-      collisions: candidatesAfterGuard.length,
-      protected_other_client: protectedByOtherClient || undefined,
-      ratio,
-    };
+    if (!opts.overrideRatioCeiling) {
+      // No API calls were made to reach this decision — retain whatever
+      // api_access_ok already said; only bump last_run_at for observability.
+      // Watermark deliberately NOT advanced — these entries were never cleared.
+      await touchMember(member.id, { api_access_ok: member.api_access_ok });
+      return {
+        ...base,
+        status: "aborted_ratio",
+        collisions: candidatesAfterGuard.length,
+        protected_other_client: protectedByOtherClient || undefined,
+        ratio,
+      };
+    }
+    console.warn(
+      `[purge] ratio ceiling OVERRIDDEN for ${client.external_id}/${member.pb_member_id} (targeted): ` +
+        `${(ratio * 100).toFixed(1)}% of indexed book (> ${(opts.maxRatio * 100).toFixed(1)}% ceiling) — proceeding with deletes`
+    );
   }
 
   base.collisions = candidatesAfterGuard.length;
@@ -969,6 +1003,15 @@ export async function runPurge(
   opts: PurgeOptions,
   onlySlug?: string
 ): Promise<PurgeRunSummary> {
+  // The ratio-ceiling override is a single-client escape hatch. Refuse it for an
+  // all-clients run so it can never wipe every over-suppressed book at once
+  // (belt-and-suspenders — the entry points also gate on this, but runPurge is
+  // the one choke point every trigger funnels through).
+  if (opts.overrideRatioCeiling && !onlySlug) {
+    throw new Error(
+      "overrideRatioCeiling requires a specific client slug — refusing to bypass the DNC ratio ceiling for an all-clients run"
+    );
+  }
   const run = await prisma.phoneburnerPurgeRun.create({
     data: { dry_run: opts.dryRun, status: "running" },
   });

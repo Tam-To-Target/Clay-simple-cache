@@ -44,6 +44,7 @@ import {
   purgeClient,
   needsFullScan,
   purgeOptionsFromEnv,
+  runPurge,
   DncSets,
   PurgeContext,
 } from "../../src/services/phoneburner-purge.service";
@@ -168,6 +169,15 @@ describe("purgeOptionsFromEnv", () => {
     expect(purgeOptionsFromEnv().maxRatio).toBe(0.15); // env can tighten
     delete process.env.PB_PURGE_MAX_RATIO;
   });
+
+  it("overrideRatioCeiling: defaults to false and is never sourced from env, only explicit opt-in", () => {
+    expect(purgeOptionsFromEnv().overrideRatioCeiling).toBe(false);
+    // Even a truthy-looking env var must not enable it (deliberately not read).
+    process.env.PB_PURGE_OVERRIDE_RATIO = "true";
+    expect(purgeOptionsFromEnv().overrideRatioCeiling).toBe(false);
+    delete process.env.PB_PURGE_OVERRIDE_RATIO;
+    expect(purgeOptionsFromEnv({ overrideRatioCeiling: true }).overrideRatioCeiling).toBe(true);
+  });
 });
 
 const counters = () => ({ deletedThisRun: 0 });
@@ -245,6 +255,24 @@ describe("purgeMember", () => {
     expect(r.status).toBe("aborted_ratio");
     expect(deleteMock).not.toHaveBeenCalled();
     expect(mockPrisma.phoneburnerDeletion.create).not.toHaveBeenCalled();
+  });
+
+  it("overrideRatioCeiling bypasses the gate: a book over the ceiling is purged instead of aborted", async () => {
+    // Same shape as the abort test (100% on DNC, well over the gate) but with
+    // the override on — every collision must be deleted, none aborted.
+    const liveOpts = { ...OPTS, dryRun: false, maxRatio: 0.4, overrideRatioCeiling: true };
+    tokenMock.mockResolvedValue("tok");
+    fetchMock.mockResolvedValue([
+      contact({ id: "c1", emails: ["a@b.com"] }),
+      contact({ id: "c2", emails: ["a@b.com"] }),
+    ]);
+    deleteMock.mockResolvedValue({ ok: true, status: 204, alreadyGone: false });
+    const s = sets(["a@b.com"], [], []);
+    const r = await purgeMember(CLIENT, MEMBER, s, solo(s), liveOpts, "run1", counters());
+    expect(r.status).toBe("ok");
+    expect(r.collisions).toBe(2);
+    expect(r.deleted).toBe(2);
+    expect(deleteMock).toHaveBeenCalledTimes(2);
   });
 
   it("records a failed delete without throwing", async () => {
@@ -855,5 +883,14 @@ describe("purgeClient — auto-mode dispatch", () => {
     const byId = Object.fromEntries(r.members.map((m) => [m.pb_member_id, m]));
     expect(byId.pb1.status).toBe("skipped_no_token");
     expect(byId.pb2.status).toBe("error");
+  });
+});
+
+describe("runPurge — overrideRatioCeiling guard", () => {
+  it("refuses overrideRatioCeiling without a client slug (never bypasses the ceiling for all clients)", async () => {
+    const opts = purgeOptionsFromEnv({ dryRun: true, overrideRatioCeiling: true });
+    await expect(runPurge(opts)).rejects.toThrow(/requires a specific client slug/);
+    // Guard runs BEFORE any DB write — no run row created.
+    expect(mockPrisma.phoneburnerPurgeRun.create).not.toHaveBeenCalled();
   });
 });

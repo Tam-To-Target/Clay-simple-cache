@@ -11,14 +11,27 @@ import {
 export const phoneburnerController = {
   /**
    * POST /admin/phoneburner/purge
-   * Body: { client_id?, dry_run? }
+   * Body: { client_id?, dry_run?, override_ratio_ceiling? }
    * Runs the PhoneBurner DNC purge for one client (by external_id) or all
    * eligible clients. Dry-run by default (env PB_PURGE_DRY_RUN, default true)
    * unless `dry_run:false` is passed explicitly.
+   *
+   * `override_ratio_ceiling:true` bypasses the 30% collision-ratio safety gate
+   * for a confirmed-heavy client (e.g. StudentBridge). It REQUIRES `client_id`
+   * (400 otherwise) — the ceiling is never bypassed for an all-clients run.
    */
   async purge(req: Request, res: Response): Promise<void> {
     try {
-      const { client_id, dry_run } = req.body || {};
+      const { client_id, dry_run, override_ratio_ceiling } = req.body || {};
+      const overrideRatioCeiling = override_ratio_ceiling === true;
+
+      if (overrideRatioCeiling && !client_id) {
+        res.status(400).json({
+          error:
+            "override_ratio_ceiling requires client_id — the DNC ratio ceiling is never bypassed for an all-clients run",
+        });
+        return;
+      }
 
       // Member tokens are resolved from GTMOS (each SDR's own PhoneBurner PAT),
       // so the internal-API config must be present.
@@ -41,7 +54,10 @@ export const phoneburnerController = {
         }
       }
 
-      const opts = purgeOptionsFromEnv({ dryRun: typeof dry_run === "boolean" ? dry_run : undefined });
+      const opts = purgeOptionsFromEnv({
+        dryRun: typeof dry_run === "boolean" ? dry_run : undefined,
+        overrideRatioCeiling,
+      });
       const summary = await runPurge(opts, client_id || undefined);
       res.json({ status: "ok", run: summary });
     } catch (error: any) {

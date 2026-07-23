@@ -260,6 +260,50 @@ pb_contact_id, email, phone_e164, domain, raw Json, synced_at`, unique on
    inactive SDRs (e.g. Nathan-style) — they 403 anyway.
 8. **Per-run cap (optional)** — `PB_PURGE_MAX_DELETES_PER_RUN` circuit breaker.
 
+### Ratio-ceiling override (single-client escape hatch)
+
+Some clients dial a **deliberately** heavily-suppressed segment, so their books
+sit far above the 30% ceiling by design (e.g. **StudentBridge** — several SDR
+books run 60–70%+ on DNC). For those, the ceiling fires every night, aborts the
+purge, and posts a `#gtmos-ops-alerts` "ratio ceiling" message even though the
+suppression is expected and the collisions genuinely SHOULD be deleted.
+
+`overrideRatioCeiling` bypasses **only** the collision-ratio gate for **one
+named client**. Everything else stays on: dry-run default, backup-before-delete
+audit rows, the shared-book guard (a contact another client the SDR serves still
+wants is never deleted), meeting-protection, and the optional per-run cap.
+
+Guardrails that make it safe to keep around:
+- **Opt-in per invocation** — it is never read from an env var, so it cannot
+  silently disable the ceiling for the nightly all-clients cron.
+- **Single-client only** — `runPurge` throws if it is set without a client slug;
+  the CLI and the HTTP endpoint reject it the same way. It can never wipe every
+  over-suppressed book at once.
+- **Logged** — each overridden member logs a `ratio ceiling OVERRIDDEN` warning
+  with the real ratio, so a bypass is always visible in the service logs.
+
+**How to run it** (one-off, e.g. clearing StudentBridge's DNC collisions):
+
+```bash
+# 1. Preview — dry-run with the override, confirm the per-member would-delete counts
+npm run pb:purge -- studentbridge --override-ratio --dry-run
+
+# 2. Execute — real deletes for that client only
+npm run pb:purge -- studentbridge --override-ratio --execute
+```
+
+Or via the deployed service (member tokens resolve from GTMOS automatically):
+
+```bash
+curl -sS -X POST "$TTT_API/admin/phoneburner/purge" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"client_id":"studentbridge","override_ratio_ceiling":true,"dry_run":false}'
+```
+
+Before overriding, confirm the suppression is intended (the book really is
+dialing a segment the client asked to suppress, not a corrupt/over-broad DNC
+sync). If the list itself is wrong, fix the list — don't override.
+
 ---
 
 ## 9. Strategic note — the durable fix is upstream
