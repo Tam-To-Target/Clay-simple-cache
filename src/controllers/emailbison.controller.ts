@@ -5,10 +5,12 @@ import { runEmailbisonSuppress } from "../services/emailbison-suppress.service";
 export const emailbisonController = {
   /**
    * POST /admin/emailbison/suppress
-   * Body: { client_id?, dry_run? }
+   * Body: { client_id?, dry_run?, override_max? }
    * Push a client's (or all eligible clients') newly-DNC'd emails + domains into
    * the EmailBison workspace blocklist. Dry-run by default
    * (env EMAILBISON_SUPPRESS_DRY_RUN, default true) unless `dry_run:false`.
+   * `override_max:true` bypasses the per-run safety cap
+   * (EMAILBISON_SUPPRESS_MAX_PER_RUN) — use for an intentional large first backfill.
    *
    * Note: this endpoint runs regardless of EMAILBISON_SUPPRESS_ENABLED (that gate
    * only governs the automatic ops:daily / scheduler passes); an explicit admin
@@ -16,7 +18,7 @@ export const emailbisonController = {
    */
   async suppress(req: Request, res: Response): Promise<void> {
     try {
-      const { client_id, dry_run } = req.body || {};
+      const { client_id, dry_run, override_max } = req.body || {};
 
       // Workspace keys are resolved from GTMOS, so the internal-API config must exist.
       if (!process.env.SDR_LAUNCH_INTERNAL_URL || !process.env.SDR_LAUNCH_INTERNAL_SECRET) {
@@ -40,7 +42,10 @@ export const emailbisonController = {
       }
 
       const summary = await runEmailbisonSuppress(
-        { dryRun: typeof dry_run === "boolean" ? dry_run : undefined },
+        {
+          dryRun: typeof dry_run === "boolean" ? dry_run : undefined,
+          overrideMax: override_max === true,
+        },
         client_id || undefined
       );
       res.json({ status: "ok", run: summary });

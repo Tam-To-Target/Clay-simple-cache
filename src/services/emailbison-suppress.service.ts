@@ -31,12 +31,20 @@ export interface EmailbisonSuppressOptions {
   mode?: "auto" | "targeted";
   /** Override the env default (EMAILBISON_SUPPRESS_DRY_RUN, default true). */
   dryRun?: boolean;
+  /**
+   * Bypass the per-run safety cap (EMAILBISON_SUPPRESS_MAX_PER_RUN). Required to
+   * push an anomalously large batch — e.g. the intentional first backfill of a
+   * big client, or after reviewing a large DNC import. Never sourced from env
+   * (mirrors the PB purge's overrideRatioCeiling: explicit, per-invocation).
+   */
+  overrideMax?: boolean;
 }
 
 export type WorkspaceStatus =
   | "ok"
   | "skipped_no_new"
   | "skipped_no_key"
+  | "aborted_max" // new batch exceeded the per-run cap → nothing pushed, watermark held
   | "partial"; // some identifiers failed → watermark NOT advanced
 
 export interface WorkspaceResult {
@@ -56,6 +64,7 @@ export interface EmailbisonSuppressSummary {
   totals: {
     workspaces_processed: number;
     workspaces_skipped: number;
+    workspaces_aborted: number;
     added: number;
     already_present: number;
     failed: number;
@@ -67,6 +76,19 @@ function dryRunFromEnv(override?: boolean): boolean {
   if (typeof override === "boolean") return override;
   // Default TRUE — a live run must be explicitly requested.
   return process.env.EMAILBISON_SUPPRESS_DRY_RUN !== "false";
+}
+
+/**
+ * Per-run, per-workspace safety cap on how many identifiers a single run may push.
+ * Add-only suppression can't "delete a book" like the PB purge, so there's no
+ * meaningful percentage; instead we halt on anomalous absolute volume (a bad bulk
+ * DNC import) — protecting against mass over-suppression + API hammering. A run
+ * over the cap is aborted for that workspace (nothing pushed, watermark held) and
+ * Slack-alerted; re-run with overrideMax once reviewed. Default 5000; 0 disables.
+ */
+function maxPerRunFromEnv(): number {
+  const raw = Number(process.env.EMAILBISON_SUPPRESS_MAX_PER_RUN);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 5000;
 }
 
 /** Run EmailBison suppression for one client (by external_id) or all eligible. */
@@ -143,6 +165,28 @@ export async function runEmailbisonSuppress(
 
       const emailList = [...emails];
       const domainList = [...domains];
+
+      // Safety cap: halt an anomalously large batch (e.g. a bad bulk DNC import)
+      // unless explicitly overridden. Non-destructive — nothing is pushed and the
+      // watermark is held, so it retries once reviewed / re-run with overrideMax.
+      const totalIdentifiers = emailList.length + domainList.length;
+      const maxPerRun = maxPerRunFromEnv();
+      if (maxPerRun > 0 && totalIdentifiers > maxPerRun && !opts.overrideMax) {
+        if (!dryRun) {
+          await prisma.emailbisonWorkspace.update({
+            where: { id: ws.id },
+            data: { last_run_at: new Date(), last_run_status: "aborted_max" },
+          });
+        }
+        console.warn(
+          `[emailbison-suppress] ${client.external_id} ws ${ws.workspace_id}: ` +
+            `ABORTED — ${totalIdentifiers} identifiers > cap ${maxPerRun} ` +
+            `(${emailList.length} email + ${domainList.length} domain). Nothing pushed, ` +
+            `watermark held. Re-run with overrideMax once reviewed.`
+        );
+        results.push({ ...base, status: "aborted_max", watermark_advanced: false });
+        continue;
+      }
 
       if (dryRun) {
         // Compute + log only. No POSTs, no audit rows (a first backfill can be
@@ -229,46 +273,51 @@ export async function runEmailbisonSuppress(
 
   const totals = results.reduce(
     (acc, r) => {
-      const skipped = r.status === "skipped_no_new" || r.status === "skipped_no_key";
-      if (skipped) acc.workspaces_skipped++;
+      if (r.status === "aborted_max") acc.workspaces_aborted++;
+      else if (r.status === "skipped_no_new" || r.status === "skipped_no_key") acc.workspaces_skipped++;
       else acc.workspaces_processed++;
       acc.added += r.emails.added + r.domains.added;
       acc.already_present += r.emails.already + r.domains.already;
       acc.failed += r.emails.failed + r.domains.failed;
       return acc;
     },
-    { workspaces_processed: 0, workspaces_skipped: 0, added: 0, already_present: 0, failed: 0 }
+    { workspaces_processed: 0, workspaces_skipped: 0, workspaces_aborted: 0, added: 0, already_present: 0, failed: 0 }
   );
 
-  const status: "ok" | "partial" = totals.failed > 0 ? "partial" : "ok";
+  // A cap-abort is an operational anomaly (needs review + override), so it makes
+  // the run "partial" and triggers the alert alongside hard failures.
+  const status: "ok" | "partial" =
+    totals.failed > 0 || totals.workspaces_aborted > 0 ? "partial" : "ok";
   const summary: EmailbisonSuppressSummary = { run_id, dry_run: dryRun, workspaces: results, totals, status };
 
   await sendFailureAlert(summary);
   return summary;
 }
 
-/** Post a Slack alert only when identifiers failed to suppress. Never throws. */
+/** Post a Slack alert on suppression failures OR cap-aborts. Never throws. */
 async function sendFailureAlert(summary: EmailbisonSuppressSummary): Promise<void> {
   try {
-    if (summary.dry_run || summary.totals.failed === 0) return;
-    const offenders = summary.workspaces.filter((w) => w.emails.failed + w.domains.failed > 0);
-    const lines = offenders
-      .map(
-        (w) =>
-          `• *${w.client_external_id}* ws ${w.workspace_id}: ${w.emails.failed} email + ${w.domains.failed} domain failed`
-      )
-      .join("\n");
-    const text = `EmailBison suppression: ${summary.totals.failed} identifier(s) failed`;
+    if (summary.dry_run) return;
+    if (summary.totals.failed === 0 && summary.totals.workspaces_aborted === 0) return;
+    const failLines = summary.workspaces
+      .filter((w) => w.emails.failed + w.domains.failed > 0)
+      .map((w) => `• *${w.client_external_id}* ws ${w.workspace_id}: ${w.emails.failed} email + ${w.domains.failed} domain failed`);
+    const abortLines = summary.workspaces
+      .filter((w) => w.status === "aborted_max")
+      .map((w) => `• *${w.client_external_id}* ws ${w.workspace_id}: batch exceeded the per-run cap — held for review (re-run with overrideMax)`);
+    const lines = [...failLines, ...abortLines].join("\n");
+    const text = `EmailBison suppression: ${summary.totals.failed} failed, ${summary.totals.workspaces_aborted} workspace(s) cap-aborted`;
     await postSlackMessage(
       process.env.OPS_ALERT_SLACK_CHANNEL_ID || DEFAULT_CHANNEL_ID,
       [
-        { type: "header", text: { type: "plain_text", text: "⚠️ EmailBison suppression failures" } },
+        { type: "header", text: { type: "plain_text", text: "⚠️ EmailBison suppression needs attention" } },
         {
           type: "section",
           text: {
             type: "mrkdwn",
             text:
-              `run \`${summary.run_id}\` — ${summary.totals.failed} failed ` +
+              `run \`${summary.run_id}\` — ${summary.totals.failed} failed, ` +
+              `${summary.totals.workspaces_aborted} cap-aborted ` +
               `(${summary.totals.added} added, ${summary.totals.already_present} already suppressed).\n` +
               `Watermark held for these workspaces — they'll retry next run.\n${lines}`,
           },
