@@ -51,10 +51,13 @@ export interface WorkspaceResult {
   client_external_id: string;
   client_name: string;
   workspace_id: number;
+  workspace_name: string | null;
   status: WorkspaceStatus;
   emails: { added: number; already: number; failed: number };
   domains: { added: number; already: number; failed: number };
   watermark_advanced: boolean;
+  /** On aborted_max: what the run WOULD have pushed (for the Slack alert). */
+  capBlocked?: { emails: number; domains: number };
 }
 
 export interface EmailbisonSuppressSummary {
@@ -116,6 +119,7 @@ export async function runEmailbisonSuppress(
         client_external_id: client.external_id,
         client_name: client.name,
         workspace_id: ws.workspace_id,
+        workspace_name: ws.workspace_name ?? null,
         status: "ok",
         emails: { added: 0, already: 0, failed: 0 },
         domains: { added: 0, already: 0, failed: 0 },
@@ -184,7 +188,12 @@ export async function runEmailbisonSuppress(
             `(${emailList.length} email + ${domainList.length} domain). Nothing pushed, ` +
             `watermark held. Re-run with overrideMax once reviewed.`
         );
-        results.push({ ...base, status: "aborted_max", watermark_advanced: false });
+        results.push({
+          ...base,
+          status: "aborted_max",
+          watermark_advanced: false,
+          capBlocked: { emails: emailList.length, domains: domainList.length },
+        });
         continue;
       }
 
@@ -294,37 +303,80 @@ export async function runEmailbisonSuppress(
   return summary;
 }
 
-/** Post a Slack alert on suppression failures OR cap-aborts. Never throws. */
-async function sendFailureAlert(summary: EmailbisonSuppressSummary): Promise<void> {
+/**
+ * Dedicated EmailBison-suppression Slack alert (distinct from the PhoneBurner
+ * ratio-ceiling alert). Fires on cap-aborts and/or hard failures — never on a
+ * clean run, never on a dry-run. Never throws. Lists every affected workspace
+ * with its counts, then explains + gives the action, PB-alert style.
+ */
+export async function sendFailureAlert(summary: EmailbisonSuppressSummary): Promise<void> {
   try {
     if (summary.dry_run) return;
-    if (summary.totals.failed === 0 && summary.totals.workspaces_aborted === 0) return;
-    const failLines = summary.workspaces
-      .filter((w) => w.emails.failed + w.domains.failed > 0)
-      .map((w) => `• *${w.client_external_id}* ws ${w.workspace_id}: ${w.emails.failed} email + ${w.domains.failed} domain failed`);
-    const abortLines = summary.workspaces
-      .filter((w) => w.status === "aborted_max")
-      .map((w) => `• *${w.client_external_id}* ws ${w.workspace_id}: batch exceeded the per-run cap — held for review (re-run with overrideMax)`);
-    const lines = [...failLines, ...abortLines].join("\n");
-    const text = `EmailBison suppression: ${summary.totals.failed} failed, ${summary.totals.workspaces_aborted} workspace(s) cap-aborted`;
-    await postSlackMessage(
-      process.env.OPS_ALERT_SLACK_CHANNEL_ID || DEFAULT_CHANNEL_ID,
-      [
-        { type: "header", text: { type: "plain_text", text: "⚠️ EmailBison suppression needs attention" } },
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text:
-              `run \`${summary.run_id}\` — ${summary.totals.failed} failed, ` +
-              `${summary.totals.workspaces_aborted} cap-aborted ` +
-              `(${summary.totals.added} added, ${summary.totals.already_present} already suppressed).\n` +
-              `Watermark held for these workspaces — they'll retry next run.\n${lines}`,
-          },
+    const aborted = summary.workspaces.filter((w) => w.status === "aborted_max");
+    const failed = summary.workspaces.filter((w) => w.emails.failed + w.domains.failed > 0);
+    if (aborted.length === 0 && failed.length === 0) return;
+
+    const cap = maxPerRunFromEnv();
+    const nf = (n: number) => n.toLocaleString("en-US");
+
+    const blocks: any[] = [
+      {
+        type: "header",
+        text: { type: "plain_text", text: "🚨 EmailBison DNC suppression hit the per-run cap", emoji: true },
+      },
+    ];
+
+    if (aborted.length > 0) {
+      const lines = aborted
+        .map((w) => {
+          const e = w.capBlocked?.emails ?? 0;
+          const d = w.capBlocked?.domains ?? 0;
+          const label = w.workspace_name ? ` "${w.workspace_name}"` : "";
+          return (
+            `• *${w.client_external_id}* — ws ${w.workspace_id}${label}: ` +
+            `${nf(e + d)} new DNC identifiers (${nf(e)} email + ${nf(d)} domain) ` +
+            `> cap ${nf(cap)} → aborted, 0 suppressed`
+          );
+        })
+        .join("\n");
+      blocks.push({ type: "section", text: { type: "mrkdwn", text: lines } });
+      blocks.push({
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text:
+            `*What this means:* each workspace above had more than ${nf(cap)} new DNC identifiers ` +
+            `queued in a single run, so suppression aborted that workspace and added *nothing* to its ` +
+            `EmailBison blocklist (hard safety cap). No emails were suppressed; the watermark is held, ` +
+            `so it retries next run.\n\n` +
+            `*Action:* this is expected on a client's first backfill. If the volume is intended, re-run ` +
+            `for that client with \`override_max: true\` (\`POST /admin/emailbison/suppress\`) or raise ` +
+            `\`EMAILBISON_SUPPRESS_MAX_PER_RUN\`. Otherwise check for an over-broad DNC import before the next run.`,
         },
-      ],
-      text
-    );
+      });
+    }
+
+    if (failed.length > 0) {
+      const lines = failed
+        .map(
+          (w) =>
+            `• *${w.client_external_id}* — ws ${w.workspace_id}: ` +
+            `${w.emails.failed} email + ${w.domains.failed} domain failed to suppress`
+        )
+        .join("\n");
+      blocks.push({
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `*Hard failures* (watermark held, will retry):\n${lines}`,
+        },
+      });
+    }
+
+    const text =
+      `EmailBison DNC suppression: ${summary.totals.workspaces_aborted} workspace(s) cap-aborted, ` +
+      `${summary.totals.failed} identifier(s) failed`;
+    await postSlackMessage(process.env.OPS_ALERT_SLACK_CHANNEL_ID || DEFAULT_CHANNEL_ID, blocks, text);
   } catch (err: any) {
     console.error("[emailbison-suppress] slack alert failed:", err?.message || err);
   }
