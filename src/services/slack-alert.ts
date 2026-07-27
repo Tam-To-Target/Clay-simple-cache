@@ -16,6 +16,7 @@
  * NEVER throws — an alerting failure must not fail the purge it is reporting on.
  */
 import type { PurgeRunSummary } from "./phoneburner-purge.service";
+import { shouldSendAlert } from "./alert-throttle.service";
 
 /** #gtmos-ops-alerts in the TAM to Target workspace. */
 export const DEFAULT_CHANNEL_ID = "C0BGNP8EAQY";
@@ -163,6 +164,12 @@ export async function sendRatioCeilingAlert(
 
     const hits = collectRatioCeilingHits(summary);
     if (!hits.length) return;
+
+    // Once per day: the daily cron + hourly detector can both hit the ceiling.
+    if (!(await shouldSendAlert("phoneburner_ratio_ceiling"))) {
+      console.log("[slack-alert] ratio-ceiling alert muted (already sent within the throttle window)");
+      return;
+    }
 
     const channel = process.env.OPS_ALERT_SLACK_CHANNEL_ID ?? DEFAULT_CHANNEL_ID;
     const { text, blocks } = buildRatioCeilingBlocks(summary, maxRatio, hits);

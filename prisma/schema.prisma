@@ -452,3 +452,12 @@ model EmailbisonSuppression {
   @@index([run_id])
   @@map("emailbison_suppressions")
 }
+
+/// Once-per-window guard for Slack ops alerts (no Redis in this service).
+/// One row per alert key; last_sent_at is the last time that alert posted.
+model AlertThrottle {
+  key          String   @id
+  last_sent_at DateTime
+
+  @@map("alert_throttle")
+}

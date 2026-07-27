@@ -25,6 +25,7 @@ import prisma from "../db/prisma";
 import { getWorkspaceKey } from "./emailbison-token.service";
 import { suppressEmail, suppressDomain, mapLimit, SuppressResult } from "./emailbison.service";
 import { postSlackMessage, DEFAULT_CHANNEL_ID } from "./slack-alert";
+import { shouldSendAlert } from "./alert-throttle.service";
 
 export interface EmailbisonSuppressOptions {
   /** "auto" (daily) / "targeted" (hourly) are informational; behavior is identical. */
@@ -315,6 +316,12 @@ export async function sendFailureAlert(summary: EmailbisonSuppressSummary): Prom
     const aborted = summary.workspaces.filter((w) => w.status === "aborted_max");
     const failed = summary.workspaces.filter((w) => w.emails.failed + w.domains.failed > 0);
     if (aborted.length === 0 && failed.length === 0) return;
+
+    // Once per day: the daily cron + hourly detector can both hit the cap.
+    if (!(await shouldSendAlert("emailbison_suppress_cap"))) {
+      console.log("[emailbison-suppress] alert muted (already sent within the throttle window)");
+      return;
+    }
 
     const cap = maxPerRunFromEnv();
     const nf = (n: number) => n.toLocaleString("en-US");
