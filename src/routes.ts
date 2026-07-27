@@ -5,6 +5,7 @@ import { linkedinFinderController } from './controllers/linkedin-finder.controll
 import { dncController } from './controllers/dnc.controller';
 import { hubspotController } from './controllers/hubspot.controller';
 import { phoneburnerController } from './controllers/phoneburner.controller';
+import { emailbisonController } from './controllers/emailbison.controller';
 import { contactsController } from './controllers/contacts.controller';
 import { scoringController } from './controllers/scoring.controller';
 
@@ -58,6 +59,10 @@ router.post('/admin/phoneburner/purge', authMiddleware, phoneburnerController.pu
 // PhoneBurner list upload (push a lead list into the assigned SDR's book,
 // DNC-scrubbed, tagged, foldered)
 router.post('/admin/phoneburner/upload', authMiddleware, phoneburnerController.upload);
+
+// EmailBison DNC suppression (add DNC emails + domains to the client's EmailBison
+// workspace blocklist — the email-channel analog of the PhoneBurner purge)
+router.post('/admin/emailbison/suppress', authMiddleware, emailbisonController.suppress);
 
 // ── Config-driven fit scoring (multi-tenant) ────────────────────────────────
 // Deterministic scoring in the engine; AI writes reasoning text only. Config

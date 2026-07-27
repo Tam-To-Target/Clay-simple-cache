@@ -48,6 +48,16 @@ export interface SdrPhoneburnerToken {
   status: string;
 }
 
+export interface SdrEmailbisonWorkspace {
+  /** EmailBison integer workspace id (the tenant the bearer key maps to). */
+  workspaceId: number;
+  workspaceName: string | null;
+  /** GTMOS client id (uuid) this workspace maps to — NOT this repo's Client.id. */
+  clientId: string;
+  /** Decrypted per-workspace EmailBison API key (Bearer for send.tamtotarget.com). */
+  apiKey: string;
+}
+
 function config(): { baseUrl: string; secret: string } {
   const baseUrl = process.env.SDR_LAUNCH_INTERNAL_URL;
   const secret = process.env.SDR_LAUNCH_INTERNAL_SECRET;
@@ -97,6 +107,25 @@ export async function fetchPhoneburnerTokens(): Promise<SdrPhoneburnerToken[]> {
   }
   const json = (await res.json()) as { tokens?: SdrPhoneburnerToken[] };
   return json.tokens ?? [];
+}
+
+/**
+ * Fetch every client-mapped EmailBison workspace + its decrypted API key from
+ * GTMOS (the source of truth for these secrets, encrypted at rest). Used by the
+ * EmailBison DNC suppression service to blocklist a client's DNC contacts in
+ * that client's sending workspace. Throws on a config/transport failure.
+ */
+export async function fetchEmailbisonWorkspaces(): Promise<SdrEmailbisonWorkspace[]> {
+  const { baseUrl, secret } = config();
+  const res = await fetch(`${baseUrl}/api/internal/emailbison-tokens`, {
+    headers: { "X-Internal-Secret": secret },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`GTMOS /api/internal/emailbison-tokens failed: HTTP ${res.status} ${body}`);
+  }
+  const json = (await res.json()) as { workspaces?: SdrEmailbisonWorkspace[] };
+  return json.workspaces ?? [];
 }
 
 /**

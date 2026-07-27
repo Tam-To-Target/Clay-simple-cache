@@ -25,6 +25,7 @@
  */
 import { detectAndSyncChangedClients } from "./services/dnc-sync.service";
 import { runPurge, purgeOptionsFromEnv } from "./services/phoneburner-purge.service";
+import { runEmailbisonSuppress } from "./services/emailbison-suppress.service";
 
 /** Deploys shouldn't be hammered by a detector tick the instant they boot. */
 const FIRST_TICK_DELAY_MS = 2 * 60 * 1000;
@@ -62,6 +63,17 @@ async function tick(): Promise<void> {
       `[scheduler] tick: checked ${detect.checked} client(s), ${changedCount} changed; ` +
         `purge ${purge.status} — ${t.deleted} ${purge.dry_run ? "would-delete" : "deleted"}, ${t.failed} failed.`
     );
+
+    // EmailBison suppression on the same tick — add newly-DNC'd emails/domains to
+    // the client's EmailBison blocklist. Gated (ships off); honors the same
+    // EMAILBISON_SUPPRESS_DRY_RUN default as the service.
+    if (process.env.EMAILBISON_SUPPRESS_ENABLED === "true") {
+      const eb = await runEmailbisonSuppress({ mode: "targeted" });
+      console.log(
+        `[scheduler] emailbison ${eb.status} — ${eb.totals.added} added, ` +
+          `${eb.totals.already_present} already, ${eb.totals.failed} failed.`
+      );
+    }
   } catch (err: any) {
     // A tick failure must never crash the web service or surface as an
     // unhandled rejection — log and let the next tick try again.

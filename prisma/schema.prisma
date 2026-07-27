@@ -150,11 +150,13 @@ model Client {
   pb_client_tag        String?
   pb_lead_score_prefix String?
 
-  dnc_sources         DncSource[]
-  dnc_entries         DncEntry[]
-  phoneburner_members PhoneburnerMember[]
-  contact_links       ContactClient[]
-  pb_lead_scores      PbLeadScore[]
+  dnc_sources             DncSource[]
+  dnc_entries             DncEntry[]
+  phoneburner_members     PhoneburnerMember[]
+  contact_links           ContactClient[]
+  pb_lead_scores          PbLeadScore[]
+  emailbison_workspaces   EmailbisonWorkspace[]
+  emailbison_suppressions EmailbisonSuppression[]
 
   @@index([external_id])
   @@map("clients")
@@ -396,4 +398,57 @@ model PhoneburnerPurgeRun {
   notes             String?
 
   @@map("phoneburner_purge_runs")
+}
+
+// ─── EmailBison DNC suppression (email-channel analog of the PhoneBurner purge) ───
+// A client's EmailBison sending workspace(s). We suppress that client's DNC
+// contacts (email + domain) in the workspace's native "Block List" via the raw
+// EmailBison API. Mirrors PhoneburnerMember (client → provider account + per-
+// account watermark) but simpler: suppression is ADD-ONLY to a durable remote
+// list, so there is no identity index, full scan, ratio ceiling, or shared-book
+// guard (workspaces are strictly per-client). The per-workspace API key is NOT
+// stored here — it's resolved at runtime from GTMOS (see emailbison-token.service).
+model EmailbisonWorkspace {
+  id             String  @id @default(uuid()) @db.Uuid
+  client_id      String  @db.Uuid
+  client         Client  @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  workspace_id   Int // EmailBison integer workspace id (the tenant; the bearer key maps to it)
+  workspace_name String?
+  active         Boolean @default(true)
+  // Watermark: every dnc_entry of this client with created_at <= this has
+  // already been pushed to this workspace's blocklist. dnc.service.diffSourceEntries
+  // preserves created_at on unchanged rows, so "new since last run" =
+  // created_at > suppressed_through. Advanced only on a run with zero failures.
+  suppressed_through DateTime? @db.Timestamptz(6)
+  emails_suppressed  Int       @default(0) // running audit counters
+  domains_suppressed Int       @default(0)
+  last_run_at        DateTime? @db.Timestamptz(6)
+  last_run_status    String?
+  created_at         DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime  @updatedAt @db.Timestamptz(6)
+
+  @@unique([client_id, workspace_id])
+  @@index([client_id])
+  @@map("emailbison_workspaces")
+}
+
+// Audit trail: one row per identifier we attempted to suppress. Lets us prove
+// what was pushed and reconcile. `status`: added | already_present | failed | dry_run.
+model EmailbisonSuppression {
+  id           String   @id @default(uuid()) @db.Uuid
+  client_id    String   @db.Uuid
+  client       Client   @relation(fields: [client_id], references: [id], onDelete: Cascade)
+  workspace_id Int
+  type         String // 'EMAIL' | 'DOMAIN'
+  value        String
+  provider_id  Int? // the id EmailBison assigned (from a 201 response), when known
+  status       String // added | already_present | failed | dry_run
+  http_status  Int?
+  error        String?
+  run_id       String?  @db.Uuid
+  created_at   DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([client_id, type, value])
+  @@index([run_id])
+  @@map("emailbison_suppressions")
 }

@@ -39,6 +39,7 @@ import {
   SourceSyncResult,
 } from "../services/dnc-sync.service";
 import { runPurge, purgeOptionsFromEnv } from "../services/phoneburner-purge.service";
+import { runEmailbisonSuppress } from "../services/emailbison-suppress.service";
 
 /**
  * Fail fast with a clear message if the env this run needs is missing.
@@ -149,6 +150,24 @@ async function main() {
       `${t.protected_other_client ? `, ${t.protected_other_client} kept (shared-book)` : ""}.`
   );
 
+  // ---- Phase 3: EmailBison suppression ----------------------------------
+  // Same DNC entries drive it (created_at watermark, per workspace). Add-only to
+  // the EmailBison blocklist — the email-channel analog of the PB purge. Gated:
+  // runs only when EMAILBISON_SUPPRESS_ENABLED === "true" (ships off); honors the
+  // same --dry-run/--execute flags as the purge (else EMAILBISON_SUPPRESS_DRY_RUN).
+  let ebFailed = 0;
+  if (process.env.EMAILBISON_SUPPRESS_ENABLED === "true") {
+    console.log("\n=== Phase 3: EmailBison suppression ===");
+    const ebDry = forceExecute ? false : forceDry ? true : undefined;
+    const eb = await runEmailbisonSuppress({ mode: "auto", dryRun: ebDry }, slug);
+    ebFailed = eb.totals.failed;
+    console.log(
+      `EmailBison ${eb.status.toUpperCase()} (run ${eb.run_id}, ${eb.dry_run ? "dry-run" : "live"}): ` +
+        `${eb.totals.workspaces_processed} workspace(s), ${eb.totals.workspaces_skipped} skipped, ` +
+        `${eb.totals.added} added, ${eb.totals.already_present} already, ${eb.totals.failed} failed.`
+    );
+  }
+
   // ---- Combined summary ---------------------------------------------------
   console.log("\n=== Daily ops summary ===");
   console.log(
@@ -162,15 +181,17 @@ async function main() {
 
   const syncFailed = syncErrored.length > 0 || discoverErrors.length > 0;
   const purgeFailed = summary.status !== "ok";
-  if (syncFailed || purgeFailed) {
-    console.log(
-      `\n⚠ Daily ops completed with issues: ${syncFailed ? "sync errors" : ""}${
-        syncFailed && purgeFailed ? "; " : ""
-      }${purgeFailed ? `purge status=${summary.status}` : ""}`
-    );
+  const ebSuppressFailed = ebFailed > 0;
+  if (syncFailed || purgeFailed || ebSuppressFailed) {
+    const issues = [
+      syncFailed ? "sync errors" : "",
+      purgeFailed ? `purge status=${summary.status}` : "",
+      ebSuppressFailed ? `emailbison ${ebFailed} failed` : "",
+    ].filter(Boolean);
+    console.log(`\n⚠ Daily ops completed with issues: ${issues.join("; ")}`);
   }
 
-  process.exit(syncFailed || purgeFailed ? 1 : 0);
+  process.exit(syncFailed || purgeFailed || ebSuppressFailed ? 1 : 0);
 }
 
 main().catch((err) => {
