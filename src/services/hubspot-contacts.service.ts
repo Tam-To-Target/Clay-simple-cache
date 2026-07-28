@@ -253,6 +253,87 @@ export async function createObject(
   return json.id;
 }
 
+/** List every property definition on an object type. */
+export async function listProperties(
+  portalId: string,
+  objectType: string,
+  tokenOverride?: string
+): Promise<Array<Record<string, any>>> {
+  const res = await hsFetch(
+    portalId,
+    `/crm/v3/properties/${encodeURIComponent(objectType)}`,
+    { method: "GET" },
+    tokenOverride
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new HubspotApiError(`List properties on ${objectType} failed: HTTP ${res.status} ${body}`, res.status);
+  }
+  const json = (await res.json()) as { results?: Array<Record<string, any>> };
+  return json.results || [];
+}
+
+/**
+ * Create a property group, tolerating one that already exists. HubSpot does not
+ * reliably return 409 for a duplicate group, so an error is confirmed with a GET
+ * before it is treated as a failure.
+ */
+export async function ensurePropertyGroup(
+  portalId: string,
+  objectType: string,
+  name: string,
+  label: string,
+  tokenOverride?: string
+): Promise<"created" | "exists"> {
+  const res = await hsFetch(
+    portalId,
+    `/crm/v3/properties/${encodeURIComponent(objectType)}/groups`,
+    { method: "POST", body: JSON.stringify({ name, label }) },
+    tokenOverride
+  );
+  if (res.ok) return "created";
+
+  const check = await hsFetch(
+    portalId,
+    `/crm/v3/properties/${encodeURIComponent(objectType)}/groups/${encodeURIComponent(name)}`,
+    { method: "GET" },
+    tokenOverride
+  );
+  if (check.ok) return "exists";
+
+  const body = await res.text().catch(() => "");
+  throw new HubspotApiError(
+    `Create property group "${name}" on ${objectType} failed: HTTP ${res.status} ${body}`,
+    res.status
+  );
+}
+
+/**
+ * Create one property. Returns "exists" on 409 rather than throwing, so a
+ * provisioning run is idempotent and never patches a definition someone edited
+ * in the UI.
+ */
+export async function createProperty(
+  portalId: string,
+  objectType: string,
+  definition: Record<string, any>,
+  tokenOverride?: string
+): Promise<"created" | "exists"> {
+  const res = await hsFetch(
+    portalId,
+    `/crm/v3/properties/${encodeURIComponent(objectType)}`,
+    { method: "POST", body: JSON.stringify(definition) },
+    tokenOverride
+  );
+  if (res.ok) return "created";
+  if (res.status === 409) return "exists";
+  const body = await res.text().catch(() => "");
+  throw new HubspotApiError(
+    `Create property "${definition.name}" on ${objectType} failed: HTTP ${res.status} ${body}`,
+    res.status
+  );
+}
+
 /** Delete a contact by id (used for test cleanup). */
 export async function deleteHubspotContact(portalId: string, id: string): Promise<void> {
   const res = await hsFetch(portalId, `/crm/v3/objects/contacts/${id}`, { method: "DELETE" });

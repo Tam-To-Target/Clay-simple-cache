@@ -83,6 +83,13 @@ router.get('/config/:client_id', authMiddleware, scoringController.getConfig);
 router.post('/relevance-score', authMiddleware, relevanceController.score);
 router.put('/relevance-config/:client_id', authMiddleware, relevanceController.putConfig);
 router.get('/relevance-config/:client_id', authMiddleware, relevanceController.getConfig);
+// Property provisioning for the Signal object. Deliberately NOT in the
+// hubspot-provisioner: that app uses the public OAuth grant, which cannot reach
+// the Signal object at any scope. This service holds the client's private-app
+// token, so the credential that writes the verdict also creates its fields.
+// GET = dry run (plan + what already exists), POST = create (idempotent).
+router.get('/relevance-provision/:client_id', authMiddleware, relevanceController.provision);
+router.post('/relevance-provision/:client_id', authMiddleware, relevanceController.provision);
 
 router.get('/docs/api', docsController.get);
 

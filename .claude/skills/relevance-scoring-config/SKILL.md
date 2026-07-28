@@ -202,10 +202,27 @@ These are not hypothetical — each cost a wrong tier in testing.
 
 ## Enabling HubSpot push
 
-1. Pre-create the properties on the client's Signal object: an enumeration for
-   the tier (options matching your `label`s **exactly**), a number for points, a
-   textarea for reasoning, plus the spine properties below. `signal_id_field`
-   must exist and be **unique** — it is the upsert key.
+1. Provision the properties on the client's Signal object. **Don't hand-build them,
+   and don't look for this in the hubspot-provisioner** — that app uses the public
+   OAuth grant, which cannot reach the Signal object at all. It's an endpoint on
+   *this* service, using the client's private-app token:
+
+   ```
+   GET  /relevance-provision/:client_id    # dry run: the plan + what already exists
+   POST /relevance-provision/:client_id    # create them (idempotent)
+   ```
+
+   Order matters: **PUT the config first**, then provision. The plan is derived
+   from the stored config — the spine from `field_map`, the verdict properties from
+   `tier_field`/`points_field`/`reasoning_field`, and the tier enum's options from
+   your **tier ladder labels**. So provisioning and pushing can never drift, and a
+   custom label can never be rejected by the enum.
+
+   It skips HubSpot-defined properties (`hs_name`), creates the signal-id property
+   with `hasUniqueValue`, never patches an existing definition, and returns `207`
+   with `failed[]` if some properties fail. Watch the `warnings` array: a
+   pre-existing **non-unique** signal-id property silently breaks the push's record
+   lookup and must be recreated.
 2. Set the `hubspot_push` block (above). `object_type` defaults to `0-162`,
    `signal_id_field` to `sb_signal_id`.
 3. Pass `"push_to_hubspot": true` per call.

@@ -9,6 +9,7 @@ import {
   DEFAULT_CREATE_ONLY_FIELDS,
 } from "../relevance/hubspot-fields";
 import { hashValues } from "../scoring/engine";
+import { buildPropertyPlan } from "../relevance/provision";
 import { relevanceConfigService } from "../services/relevance-config.service";
 import { relevanceCacheService } from "../services/relevance-cache.service";
 import { classifySignal } from "../services/relevance-ai.service";
@@ -17,6 +18,9 @@ import {
   updateObjectProperties,
   searchObjectIdsByProperty,
   createObject,
+  listProperties,
+  ensurePropertyGroup,
+  createProperty,
   HubspotApiError,
 } from "../services/hubspot-contacts.service";
 import { HubspotAccessError } from "../services/hubspot-token.service";
@@ -248,6 +252,129 @@ export const relevanceController = {
         signal_types: Object.keys(stored.document.ai?.prompts || {}),
         private_app_token_set: stored.private_app_token_set,
         config: stored.document,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  },
+
+  /**
+   * POST /relevance-provision/:client_id
+   * GET  /relevance-provision/:client_id   (plan + current status, no writes)
+   *
+   * Create the HubSpot properties this client's push writes, on their Signal
+   * object. Lives here rather than in the hubspot-provisioner because the
+   * provisioner authenticates with the public OAuth grant, which cannot reach the
+   * Signal object at all — this service already holds the private-app token that
+   * can, so the credential that writes the verdict also creates its fields.
+   *
+   * Idempotent: an existing property is left exactly as-is, never patched.
+   */
+  async provision(req: Request, res: Response): Promise<void> {
+    try {
+      const clientId = req.params.client_id;
+      const dryRun = req.method === "GET";
+
+      const stored = await relevanceConfigService.get(clientId);
+      if (!stored) {
+        res.status(404).json({ error: `No relevance config for client_id: ${clientId}` });
+        return;
+      }
+      const plan = buildPropertyPlan(stored.document);
+
+      const client = await clientService.getByExternalId(clientId);
+      if (!client || !client.hubspot_portal_id) {
+        res.status(422).json({ error: `Client ${clientId} has no connected HubSpot portal.` });
+        return;
+      }
+      const token = await relevanceConfigService.getPrivateAppToken(clientId);
+      if (!token) {
+        res.status(422).json({
+          error:
+            "No HubSpot private-app token on file for this client. Set it via " +
+            "PUT /relevance-config/:client_id as hubspot_push.private_app_token — the public OAuth " +
+            "app cannot reach the Signal object at any scope.",
+        });
+        return;
+      }
+
+      // Always report what already exists, so a dry run is genuinely useful and a
+      // real run can be verified afterwards.
+      let existing: Set<string>;
+      let uniqueOk: Record<string, boolean> = {};
+      try {
+        const live = await listProperties(client.hubspot_portal_id, plan.objectType, token);
+        existing = new Set(live.map((p) => String(p.name)));
+        for (const p of plan.properties) {
+          if (!p.hasUniqueValue) continue;
+          const found = live.find((l) => l.name === p.name);
+          if (found) uniqueOk[p.name] = !!found.hasUniqueValue;
+        }
+      } catch (e) {
+        res.status(502).json({
+          error: `Could not read properties on ${plan.objectType}: ${e instanceof Error ? e.message : String(e)}`,
+        });
+        return;
+      }
+
+      const planned = plan.properties.map((p) => ({
+        name: p.name,
+        label: p.label,
+        type: p.type,
+        fieldType: p.fieldType,
+        exists: existing.has(p.name),
+        ...(p.hasUniqueValue ? { unique_required: true, unique_on_portal: uniqueOk[p.name] } : {}),
+      }));
+
+      if (dryRun) {
+        res.json({
+          client_id: clientId,
+          object_type: plan.objectType,
+          group: plan.group,
+          total: planned.length,
+          present: planned.filter((p) => p.exists).length,
+          properties: planned,
+          skipped: plan.skipped,
+          dry_run: true,
+        });
+        return;
+      }
+
+      const groupResult = await ensurePropertyGroup(
+        client.hubspot_portal_id,
+        plan.objectType,
+        plan.group.name,
+        plan.group.label,
+        token
+      );
+
+      let created = 0;
+      let exists = 0;
+      const failed: Array<{ name: string; error: string }> = [];
+      for (const def of plan.properties) {
+        try {
+          const r = await createProperty(client.hubspot_portal_id, plan.objectType, def, token);
+          if (r === "created") created++;
+          else exists++;
+        } catch (e) {
+          // One bad property must not stop the rest.
+          failed.push({ name: def.name, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+
+      res.status(failed.length ? 207 : 200).json({
+        client_id: clientId,
+        object_type: plan.objectType,
+        group: { ...plan.group, result: groupResult },
+        created,
+        already_existed: exists,
+        failed,
+        total: plan.properties.length,
+        skipped: plan.skipped,
+        // A pre-existing non-unique upsert key silently breaks the push, so say so.
+        warnings: Object.entries(uniqueOk)
+          .filter(([, ok]) => !ok)
+          .map(([name]) => `${name} exists but is NOT unique — the push cannot reliably locate records. Recreate it as a unique property.`),
       });
     } catch (error: any) {
       res.status(500).json({ error: error?.message || "Internal server error" });

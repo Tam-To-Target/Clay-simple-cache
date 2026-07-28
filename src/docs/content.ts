@@ -916,6 +916,54 @@ column, and never returned: \`GET /relevance-config/:client_id\` reports
 \`push_to_hubspot: true\` with no token on file returns \`422\` **before** the model is
 billed, with a message naming the field to set.
 
+### GET / POST /relevance-provision/:client_id
+
+Create the HubSpot properties this client's push writes, on their Signal object.
+\`GET\` is a dry run (the plan + what already exists, no writes); \`POST\` creates them.
+
+**This lives here, not in the hubspot-provisioner**, because that app authenticates
+with the public OAuth grant and cannot reach the Signal object at all. This service
+already holds the client's private-app token, so the same credential that writes the
+verdict creates the fields it writes into — no reinstall, no per-client env var.
+
+The plan is **derived from the stored config**, not hardcoded:
+
+- the spine comes from the resolved \`hubspot_push.field_map\`, so a renamed property is
+  provisioned under its new name and an unmapped one is skipped;
+- the verdict properties use the configured \`tier_field\` / \`points_field\` /
+  \`reasoning_field\` names;
+- the tier enumeration's options are generated from the client's **tier ladder
+  labels**, so the enum can never reject a value the scorer produces.
+
+Provisioning and pushing therefore read the same config and cannot drift.
+
+**Behavior**:
+- Idempotent — an existing property is reported as \`already_existed\` and is **never
+  patched**, so a definition edited in the UI survives a re-run.
+- HubSpot-defined properties are never created. \`hs_name\` (the default target of the
+  \`name\` field) appears under \`skipped\`, not attempted.
+- The signal-id property is created with \`hasUniqueValue\`. If it already exists
+  **without** uniqueness, the response carries a \`warnings\` entry — a non-unique
+  upsert key silently breaks the push's record lookup.
+- One failed property does not stop the rest; partial success returns \`207\` with a
+  \`failed[]\` array.
+- \`422\` when the client has no connected portal, or no private-app token on file.
+
+\`\`\`json
+POST /relevance-provision/hilight
+{
+  "client_id": "hilight",
+  "object_type": "0-162",
+  "group": { "name": "starbridge_signals", "label": "StarBridge signals", "result": "exists" },
+  "created": 0,
+  "already_existed": 22,
+  "failed": [],
+  "total": 22,
+  "skipped": [{ "name": "hs_name", "reason": "HubSpot-defined property, already exists" }],
+  "warnings": []
+}
+\`\`\`
+
 ### PUT /relevance-config/:client_id
 
 Create or update the per-signal-type prompts. **Validated before persisting.**
