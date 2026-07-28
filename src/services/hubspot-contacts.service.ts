@@ -35,7 +35,22 @@ export class HubspotApiError extends Error {
   }
 }
 
-async function hsFetch(portalId: string, path: string, init: RequestInit): Promise<Response> {
+/**
+ * `tokenOverride` pins this call to a specific access token instead of the
+ * portal's OAuth grant. It exists for objects a public OAuth app cannot reach at
+ * all — record read/search/write on the Services object (`0-162`) answers "The
+ * scope needed for this API call isn't available for public use", which no scope
+ * grant fixes. A private app on the portal does have access.
+ *
+ * An override is never refreshed (private-app tokens do not expire), so a 401 is
+ * final rather than a signal to re-fetch.
+ */
+async function hsFetch(
+  portalId: string,
+  path: string,
+  init: RequestInit,
+  tokenOverride?: string
+): Promise<Response> {
   const doFetch = (token: string) =>
     fetch(`${HUBSPOT_BASE}${path}`, {
       ...init,
@@ -45,6 +60,8 @@ async function hsFetch(portalId: string, path: string, init: RequestInit): Promi
         ...(init.headers || {}),
       },
     });
+
+  if (tokenOverride) return doFetch(tokenOverride);
 
   let res = await doFetch(await getValidToken(portalId));
   if (res.status === 401) res = await doFetch(await getValidToken(portalId, { force: true }));
@@ -113,12 +130,15 @@ export async function updateObjectProperties(
   portalId: string,
   objectType: string,
   objectId: string,
-  properties: Record<string, any>
+  properties: Record<string, any>,
+  tokenOverride?: string
 ): Promise<void> {
-  const res = await hsFetch(portalId, `/crm/v3/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`, {
-    method: "PATCH",
-    body: JSON.stringify({ properties }),
-  });
+  const res = await hsFetch(
+    portalId,
+    `/crm/v3/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`,
+    { method: "PATCH", body: JSON.stringify({ properties }) },
+    tokenOverride
+  );
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new HubspotApiError(
@@ -164,16 +184,22 @@ export async function searchObjectIdsByProperty(
   portalId: string,
   objectType: string,
   property: string,
-  value: string
+  value: string,
+  tokenOverride?: string
 ): Promise<string[]> {
-  const res = await hsFetch(portalId, `/crm/v3/objects/${encodeURIComponent(objectType)}/search`, {
-    method: "POST",
-    body: JSON.stringify({
-      filterGroups: [{ filters: [{ propertyName: property, operator: "EQ", value }] }],
-      properties: [property],
-      limit: 10,
-    }),
-  });
+  const res = await hsFetch(
+    portalId,
+    `/crm/v3/objects/${encodeURIComponent(objectType)}/search`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        filterGroups: [{ filters: [{ propertyName: property, operator: "EQ", value }] }],
+        properties: [property],
+        limit: 10,
+      }),
+    },
+    tokenOverride
+  );
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new HubspotApiError(
@@ -210,12 +236,15 @@ export async function getObjectProperties(
 export async function createObject(
   portalId: string,
   objectType: string,
-  properties: Record<string, any>
+  properties: Record<string, any>,
+  tokenOverride?: string
 ): Promise<string> {
-  const res = await hsFetch(portalId, `/crm/v3/objects/${encodeURIComponent(objectType)}`, {
-    method: "POST",
-    body: JSON.stringify({ properties }),
-  });
+  const res = await hsFetch(
+    portalId,
+    `/crm/v3/objects/${encodeURIComponent(objectType)}`,
+    { method: "POST", body: JSON.stringify({ properties }) },
+    tokenOverride
+  );
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new HubspotApiError(`Create ${objectType} failed: HTTP ${res.status} ${body}`, res.status);

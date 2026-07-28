@@ -112,6 +112,17 @@ export interface RelevanceHubspotPushConfig {
    * re-pushing it would reset a status a rep changed in HubSpot.
    */
   create_only_fields?: string[];
+  /**
+   * WRITE-ONLY. HubSpot private-app token used **only** by this endpoint's push
+   * for this client. Required because record access to the Signal object is not
+   * available to a public OAuth app at any scope; every other integration keeps
+   * using the provisioner's OAuth grant.
+   *
+   * Supplied on PUT, stored in its own column, stripped from the stored document,
+   * and never returned by GET (which reports `private_app_token_set` instead).
+   * Omit it on a later PUT to keep the existing token; pass "" to clear it.
+   */
+  private_app_token?: string;
 }
 
 export interface RelevanceConfigDoc {

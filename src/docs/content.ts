@@ -834,6 +834,9 @@ endpoint joins them.
   bulk sync. See "Which properties are written" below.
 - More than one record sharing that signal id → \`push_error\`, no write (it
   refuses to guess). Pass \`hubspot_object_id\` to target one explicitly.
+- The push authenticates with the client's stored **private-app token** (see below),
+  not the OAuth grant. A \`401\` from it is final — private-app tokens are not
+  refreshable.
 - No match → the record is **created** (\`push_action: "created"\`), unless
   \`create_missing: false\`. Creation needs \`pipeline_stage\` configured, because
   the Signal object declares \`hs_pipeline_stage\` mandatory; the validator
@@ -876,6 +879,42 @@ Three behaviors worth knowing:
 Dates are normalized on the way out: Starbridge returns nanosecond precision
 (\`2026-07-27T04:38:58.148935331Z\`), which HubSpot rejects, so it is truncated to
 milliseconds.
+
+### HubSpot private-app token (per client, required for push)
+
+Record read/search/write on the Signal object is **not available to a public OAuth
+app at any scope** — HubSpot answers *"The scope needed for this API call isn't
+available for public use."* Only the object's SCHEMA endpoints are grantable. So
+the relevance push authenticates with a **HubSpot private-app token stored per
+client**, while every other integration in this service continues to use the
+provisioner's OAuth grant.
+
+Set it through the normal config API — no env vars, no redeploy per client:
+
+\`\`\`json
+PUT /relevance-config/hilight
+{
+  "ai": { "...": "..." },
+  "hubspot_push": {
+    "enabled": true,
+    "private_app_token": "pat-na1-…",
+    "...": "..."
+  }
+}
+\`\`\`
+
+The token is **write-only**. It is split out of the document, stored in its own
+column, and never returned: \`GET /relevance-config/:client_id\` reports
+\`private_app_token_set: true|false\` instead. Update semantics:
+
+| \`private_app_token\` | Effect |
+|---|---|
+| omitted | keep the token already on file — so a routine prompt edit never resends the secret |
+| \`"pat-na1-…"\` | replace the stored token |
+| \`""\` | clear it |
+
+\`push_to_hubspot: true\` with no token on file returns \`422\` **before** the model is
+billed, with a message naming the field to set.
 
 ### PUT /relevance-config/:client_id
 

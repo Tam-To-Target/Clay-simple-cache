@@ -230,6 +230,10 @@ export function validateRelevanceConfig(input: unknown): ValidationResult {
           }
         }
       }
+      // Write-only secret. Validate shape only; never echoed back anywhere.
+      if (push.private_app_token !== undefined && typeof push.private_app_token !== "string") {
+        err("hubspot_push.private_app_token", 'must be a string (use "" to clear the stored token)');
+      }
       if (push.create_only_fields !== undefined) {
         if (!Array.isArray(push.create_only_fields) || push.create_only_fields.some((x: unknown) => typeof x !== "string")) {
           err("hubspot_push.create_only_fields", "must be an array of canonical field names");

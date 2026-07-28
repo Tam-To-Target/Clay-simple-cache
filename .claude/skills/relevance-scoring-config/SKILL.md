@@ -234,6 +234,42 @@ Behavior:
 - more than one sharing that signal id → `push_error`, refuses to guess. Dedupe,
   or pass an explicit `hubspot_object_id`.
 
+### Authentication: a per-client private-app token (required for push)
+
+**Record access to the Signal object is not available to a public OAuth app at any
+scope.** HubSpot answers *"The scope needed for this API call isn't available for
+public use"* on record read/search/write for `0-162`; only the object's SCHEMA
+endpoints are grantable. Granting `crm.objects.services.*` to the provisioner app
+does **not** fix this — do not go down that road again.
+
+So the push authenticates with a **HubSpot private-app token stored per client**.
+Everything else in the service keeps using the provisioner's OAuth grant; the token
+is scoped to this endpoint by construction (its own column on the relevance config,
+read only by the push, threaded explicitly into the three HubSpot calls).
+
+Set it through the normal config API — no env var, no redeploy per client:
+
+```json
+"hubspot_push": { "enabled": true, "private_app_token": "pat-na1-…", "...": "..." }
+```
+
+It is **write-only**: stripped from the stored document and never returned. `GET`
+reports `private_app_token_set: true|false`.
+
+| `private_app_token` | Effect |
+|---|---|
+| omitted | keep the token on file — a routine prompt edit never resends the secret |
+| a value | replace it |
+| `""` | clear it |
+
+Requesting a push with no token on file → `422` **before** the model is billed.
+A `401` from the token is final; private-app tokens are not refreshable, so the
+push does not retry. If you see one, the private app was deleted or its scopes
+were narrowed in the portal.
+
+The private app needs `crm.objects.services.read` + `.write` (plus
+`crm.schemas.services.read` to inspect properties).
+
 ### Three traps in the push
 
 - **`pipeline_stage` is required when `create_missing` is on** (the default). The

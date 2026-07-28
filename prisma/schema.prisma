@@ -64,6 +64,18 @@ model RelevanceConfig {
   config_version Int      @default(1)
   // Full validated document: { ai: { business_context, prompts{} }, tiers, hubspot_push }.
   document       Json
+  // HubSpot PRIVATE APP token, used ONLY by the relevance push for this client.
+  //
+  // Required because record read/search/write on the Services object (0-162,
+  // relabeled "Signals") is not available to a public OAuth app at any scope —
+  // HubSpot answers "The scope needed for this API call isn't available for public
+  // use". Every other integration in this service keeps using the provisioner's
+  // OAuth grant; this column is deliberately scoped to the relevance config so it
+  // cannot leak into another code path.
+  //
+  // Set via PUT /relevance-config/:client_id as hubspot_push.private_app_token; it
+  // is stripped from `document` before storage and NEVER returned by GET.
+  hubspot_private_app_token String?
   created_at     DateTime @default(now()) @db.Timestamptz(6)
   updated_at     DateTime @updatedAt @db.Timestamptz(6)
 

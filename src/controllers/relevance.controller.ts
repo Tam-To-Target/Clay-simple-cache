@@ -246,6 +246,7 @@ export const relevanceController = {
         client_id: stored.client_id,
         config_version: stored.config_version,
         signal_types: Object.keys(stored.document.ai?.prompts || {}),
+        private_app_token_set: stored.private_app_token_set,
         config: stored.document,
       });
     } catch (error: any) {
@@ -266,6 +267,7 @@ export const relevanceController = {
         client_id: stored.client_id,
         config_version: stored.config_version,
         signal_types: Object.keys(stored.document.ai?.prompts || {}),
+        private_app_token_set: stored.private_app_token_set,
         tiers: resolveTiers(stored.document),
         config: stored.document,
         updated_at: stored.updated_at,
@@ -307,6 +309,12 @@ interface PushTarget {
   fieldMap: Record<string, string>;
   /** Canonical fields written on create but never overwritten on update. */
   createOnly: Set<string>;
+  /**
+   * HubSpot private-app token for THIS endpoint only. Record access to the Signal
+   * object is unavailable to a public OAuth app at any scope, so the push cannot
+   * use the provisioner grant. Every other integration in this service still does.
+   */
+  privateAppToken: string;
 }
 
 type ResolveResult = { ok: true; target: PushTarget } | { ok: false; error: string };
@@ -329,6 +337,19 @@ async function resolvePushTarget(
   const client = await clientService.getByExternalId(clientId);
   if (!client || !client.hubspot_portal_id) {
     return { ok: false, error: `Client ${clientId} has no connected HubSpot portal — cannot push.` };
+  }
+  // The push cannot fall back to the OAuth grant: record read/search/write on the
+  // Signal object returns "scope isn't available for public use" regardless of
+  // granted scopes. Fail before billing the model rather than after.
+  const privateAppToken = await relevanceConfigService.getPrivateAppToken(clientId);
+  if (!privateAppToken) {
+    return {
+      ok: false,
+      error:
+        "push_to_hubspot requested but no HubSpot private-app token is on file for this client. " +
+        "Set it via PUT /relevance-config/:client_id as hubspot_push.private_app_token — the " +
+        "public OAuth app cannot reach Signal records at any scope.",
+    };
   }
   const createMissing = push.create_missing !== false;
   if (createMissing && !push.pipeline_stage) {
@@ -354,6 +375,7 @@ async function resolvePushTarget(
       pipelineStage: push.pipeline_stage,
       fieldMap: resolveFieldMap(push.field_map),
       createOnly: new Set(push.create_only_fields ?? DEFAULT_CREATE_ONLY_FIELDS),
+      privateAppToken,
     },
   };
 }
@@ -397,7 +419,8 @@ async function executePush(
         target.portalId,
         target.objectType,
         target.signalIdField,
-        signal.signalId
+        signal.signalId,
+        target.privateAppToken
       );
       if (ids.length > 1) {
         return {
@@ -423,7 +446,12 @@ async function executePush(
         };
         if (target.pipeline) createProps.hs_pipeline = target.pipeline;
         if (target.pipelineStage) createProps.hs_pipeline_stage = target.pipelineStage;
-        const id = await createObject(target.portalId, target.objectType, createProps);
+        const id = await createObject(
+          target.portalId,
+          target.objectType,
+          createProps,
+          target.privateAppToken
+        );
         return { status: "ok", action: "created", objectId: id, properties: Object.keys(createProps) };
       }
       objectId = ids[0];
@@ -434,7 +462,13 @@ async function executePush(
       ...buildSignalProperties(fields, target.fieldMap, target.createOnly, false),
       ...verdict,
     };
-    await updateObjectProperties(target.portalId, target.objectType, objectId, updateProps);
+    await updateObjectProperties(
+      target.portalId,
+      target.objectType,
+      objectId,
+      updateProps,
+      target.privateAppToken
+    );
     return { status: "ok", action: "updated", objectId, properties: Object.keys(updateProps) };
   } catch (e) {
     if (e instanceof HubspotAccessError) {
