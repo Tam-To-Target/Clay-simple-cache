@@ -51,6 +51,53 @@ model ScoreResult {
   @@map("score_results")
 }
 
+// ─── Relevance scoring (Starbridge signals, AI-only) ────────
+// Sibling of ScoringConfig, deliberately a SEPARATE table: fit scoring is
+// deterministic and account-level, relevance is AI-only and signal-level, and
+// ScoringConfig.client_id is @unique so one client cannot hold both documents.
+// The document holds per-signal-type PROMPTS (data) — never calculation.
+model RelevanceConfig {
+  id             String   @id @default(uuid()) @db.Uuid
+  client_id      String   @unique
+  // Bumped on every successful PUT. Old relevance_results keep their old version
+  // so a historical tier stays explainable after a prompt is rewritten.
+  config_version Int      @default(1)
+  // Full validated document: { ai: { business_context, prompts{} }, tiers, hubspot_push }.
+  document       Json
+  created_at     DateTime @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([client_id])
+  @@map("relevance_configs")
+}
+
+// Every AI tier verdict, keyed by (client, config_version, signal payload hash).
+// Doubles as the cache: re-scoring an unchanged signal under the same config
+// never re-bills the model. `signal_id` is denormalized for lookup/reporting.
+model RelevanceResult {
+  id             String   @id @default(uuid()) @db.Uuid
+  client_id      String
+  config_version Int
+  // sha256 of the canonicalized payload actually sent to the model.
+  payload_hash   String
+  // Starbridge row.rowId — the natural key of the signal that was scored.
+  signal_id      String
+  filter_type    String?
+  tier           Int
+  points         Int
+  reasoning      String?
+  // The exact payload sent to the model, for audit + prompt-regression work.
+  payload        Json     @default("{}")
+  pushed         Boolean  @default(false)
+  created_at     DateTime @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([client_id, config_version, payload_hash])
+  @@index([client_id])
+  @@index([signal_id])
+  @@map("relevance_results")
+}
+
 model Profile {
   id            String   @id @default(uuid()) @db.Uuid
   email         String?  @unique

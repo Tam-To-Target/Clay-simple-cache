@@ -154,6 +154,37 @@ export async function searchCompanyIdsByDomain(
   return (json.results || []).map((r) => r.id);
 }
 
+/**
+ * Find ids of any object type whose `property` exactly matches `value`.
+ * Generalization of searchCompanyIdsByDomain, used by relevance scoring to locate
+ * a Signal record (`0-162`) by its Starbridge rowId. Returns ALL matches so the
+ * caller can detect duplicates rather than silently writing to the first.
+ */
+export async function searchObjectIdsByProperty(
+  portalId: string,
+  objectType: string,
+  property: string,
+  value: string
+): Promise<string[]> {
+  const res = await hsFetch(portalId, `/crm/v3/objects/${encodeURIComponent(objectType)}/search`, {
+    method: "POST",
+    body: JSON.stringify({
+      filterGroups: [{ filters: [{ propertyName: property, operator: "EQ", value }] }],
+      properties: [property],
+      limit: 10,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new HubspotApiError(
+      `Search ${objectType} by ${property} failed: HTTP ${res.status} ${body}`,
+      res.status
+    );
+  }
+  const json = (await res.json()) as { results?: Array<{ id: string }> };
+  return (json.results || []).map((r) => r.id);
+}
+
 /** Read selected `properties` of an object by id. Returns the properties map. */
 export async function getObjectProperties(
   portalId: string,

@@ -8,6 +8,7 @@ import { phoneburnerController } from './controllers/phoneburner.controller';
 import { emailbisonController } from './controllers/emailbison.controller';
 import { contactsController } from './controllers/contacts.controller';
 import { scoringController } from './controllers/scoring.controller';
+import { relevanceController } from './controllers/relevance.controller';
 
 import { docsController } from './controllers/docs.controller';
 import { authMiddleware } from './middleware/auth.middleware';
@@ -73,6 +74,15 @@ router.post('/fit-score', authMiddleware, scoringController.fitScore);
 router.post('/score', authMiddleware, scoringController.fitScore);
 router.put('/config/:client_id', authMiddleware, scoringController.putConfig);
 router.get('/config/:client_id', authMiddleware, scoringController.getConfig);
+
+// ── Relevance scoring for Starbridge signals (AI-only, multi-tenant) ────────
+// The other score type promised above. No deterministic rubric exists for signal
+// relevance, so the model owns the TIER — but only the tier: points are derived
+// from the tier by table lookup in code. Prompts are per Starbridge filterType.
+// The POST body carries the Starbridge top-signals result[] element verbatim.
+router.post('/relevance-score', authMiddleware, relevanceController.score);
+router.put('/relevance-config/:client_id', authMiddleware, relevanceController.putConfig);
+router.get('/relevance-config/:client_id', authMiddleware, relevanceController.getConfig);
 
 router.get('/docs/api', docsController.get);
 

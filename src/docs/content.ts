@@ -770,4 +770,123 @@ config is never stored; you get a per-field \`errors\` list. On success,
 
 Return the current config + resolved \`config_version\`. This is the endpoint the
 config-authoring agent reads to debug/test/propose edits. \`404\` if none.
+
+## Relevance Scoring (Starbridge signals, AI-only)
+
+The second score type. Where fit scoring answers *"is this account a good
+fit?"* deterministically, relevance scoring answers *"should a rep act on this
+signal, and how urgently?"* — a judgment with no deterministic rubric.
+
+**The model owns the TIER and nothing else.** It returns \`{ tier, reasoning }\`
+under a strict JSON schema. The point value is looked up from the client's tier
+ladder **in code** — the model never returns, sees, or influences a number. A
+tier outside the configured ladder is rejected, never clamped.
+
+Prompts are stored **per Starbridge signal type** (\`filterType\`), because a board
+meeting, an RFP and a job change have nothing in common except the buyer.
+
+### POST /relevance-score
+
+Body — the Starbridge API response element, **verbatim**:
+\`\`\`json
+{
+  "client_id": "hilight",
+  "signal": { "bridge": { ... }, "row": { ... } },
+  "push_to_hubspot": true,
+  "hubspot_object_id": "574591698529"
+}
+\`\`\`
+\`signal\` is one element of \`GET /api/external/feed/all/top-signals\` → \`result[]\`.
+\`bridge\` and \`row\` may also be passed at the top level. Nothing is reshaped by
+the caller: \`bridge.columns\` is the schema, \`row.columns\` is the data, and this
+endpoint joins them.
+
+**Response**:
+\`\`\`json
+{
+  "signal_id": "7d725d78-...",
+  "signal_type": "Meeting",
+  "tier": 1,
+  "tier_label": "Tier 1",
+  "points": 100,
+  "reasoning": "The board approved a funded 2026-2030 strategic plan naming staff culture...",
+  "config_version": 3,
+  "buyer": { "id": "ab09050a-...", "name": "East Brunswick Public Schools", "state": "New Jersey" },
+  "evidence_fields": ["confidenceScore", "confidenceReasoning", "op:posted_date"],
+  "cached": false,
+  "pushed": true,
+  "hubspot_object_id": "574591698529"
+}
+\`\`\`
+
+**Behavior**:
+- \`404\` if the client has no relevance config.
+- \`422\` if \`ai.enabled\` is false — relevance is AI-only, so there is no fallback.
+- \`422\` if the signal's \`filterType\` has no prompt and no \`ai.default_prompt\`.
+  Scoring a JobChange with a Meeting rubric would be worse than refusing.
+- \`502\` if the model call fails. There is no score to return, so unlike
+  fit-score reasoning this failure is fatal to the request.
+- \`push_to_hubspot\` **upserts** the Signal record, located by \`sb_signal_id\`
+  (unique, so a re-score lands on the same record). It writes the verdict plus
+  the **spine**: name, Starbridge ids, signal/entity/bridge type, buyer id +
+  name + state, the dates, and the contact. It does NOT write the wider
+  Starbridge payload — the ~43 detail properties and raw JSON blobs stay with the
+  bulk sync. See "Which properties are written" below.
+- More than one record sharing that signal id → \`push_error\`, no write (it
+  refuses to guess). Pass \`hubspot_object_id\` to target one explicitly.
+- No match → the record is **created** (\`push_action: "created"\`), unless
+  \`create_missing: false\`. Creation needs \`pipeline_stage\` configured, because
+  the Signal object declares \`hs_pipeline_stage\` mandatory; the validator
+  enforces this at config time rather than letting every create fail.
+- Cached by (client_id, config_version, hash of the evidence actually sent). A
+  prompt edit bumps \`config_version\` and so re-scores; asynchronously-arriving
+  Starbridge cells change the evidence hash and so re-score too.
+
+### Which properties are written
+
+The push writes the three verdict properties plus a fixed **spine** of canonical
+fields. Each maps to a HubSpot property, overridable per client via
+\`hubspot_push.field_map\` (map a field to \`""\` to stop writing it):
+
+| Canonical field | Default property | Source |
+|---|---|---|
+| \`name\` | \`hs_name\` | \`row.name\` → buyer name → \`Starbridge signal <id>\` |
+| \`signal_id\` | \`sb_signal_id\` | \`row.rowId\` (the upsert key) |
+| \`bridge_id\` / \`bridge_name\` | \`sb_bridge_id\` / \`sb_bridge_name\` | \`bridge.*\` |
+| \`entity_id\` / \`entity_type\` | \`sb_entity_id\` / \`sb_entity_type\` | \`row.entity\` |
+| \`filter_type\` | \`sb_filter_type\` | \`bridge.filterType\` |
+| \`buyer_id\` / \`buyer_name\` / \`buyer_state\` | \`sb_buyer_id\` / \`sb_buyer_name\` / \`sb_buyer_state\` | \`row.buyerId\`, \`buyer:name\`, \`buyer:stateName\` |
+| \`added_date\` | \`sb_added_date\` | \`op:added_date\` |
+| \`created_at\` / \`updated_at\` | \`sb_row_created_at\` / \`sb_row_updated_at\` | \`row.createdAt\` / \`row.updatedAt\` |
+| \`signal_status\` | \`sb_signal_status\` | \`common:status\` |
+| \`synced_at\` | \`sb_synced_at\` | set by the API at push time |
+| \`contact_*\` (first/last/title/email/phone) | \`sb_contact_*\` | contact columns, or \`op_template:web_contact\` |
+
+Three behaviors worth knowing:
+
+- **Nulls are never written.** An absent Starbridge value stays absent rather than
+  becoming an empty string.
+- **Bad enum values are dropped, not sent.** An unrecognized \`filterType\`,
+  \`entity.type\` or status would 400 the whole push, so it is omitted instead.
+- **\`create_only_fields\` (default \`["signal_status"]\`) are written on create but
+  never on update.** Starbridge reports \`status: "New"\` on every signal forever,
+  while HubSpot is where a rep moves it to Actioned/Saved. Re-pushing it on every
+  re-score would silently undo the rep's work. Override the list per client.
+
+Dates are normalized on the way out: Starbridge returns nanosecond precision
+(\`2026-07-27T04:38:58.148935331Z\`), which HubSpot rejects, so it is truncated to
+milliseconds.
+
+### PUT /relevance-config/:client_id
+
+Create or update the per-signal-type prompts. **Validated before persisting.**
+Beyond structure, the validator rejects prompts that try to own the output format
+or do arithmetic (\`return JSON\`, \`"points":\`, \`100/50/20\`, \`sum the score\`) —
+those fight the service's JSON schema and the code-side tier→points lookup.
+
+### GET /relevance-config/:client_id
+
+Current config + \`config_version\`, the configured \`signal_types\`, and the
+resolved \`tiers\` ladder. \`404\` if none.
+
 `;
