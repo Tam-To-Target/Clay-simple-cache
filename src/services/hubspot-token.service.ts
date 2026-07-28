@@ -52,12 +52,35 @@ const cache = new Map<string, CachedToken>();
 // can take a while, so we want comfortable runway before starting one.
 const SKEW_MS = 120_000;
 
+/**
+ * Per-portal private-app token override: `HUBSPOT_PRIVATE_APP_TOKEN_<portalId>`.
+ *
+ * Needed because some HubSpot objects are unreachable via a public OAuth app at
+ * ALL, not merely unscoped. The Services object (`0-162`, relabeled "Signals" on
+ * some portals) is the case that forced this: record read/search/write return
+ * "The scope needed for this API call isn't available for public use", which no
+ * amount of scope granting fixes. Only `crm.objects.services.*` at the SCHEMA
+ * level is grantable. A private app on the portal has full access.
+ *
+ * Server-side only — never accepted from a caller. When set, it wins over the
+ * provisioner's OAuth token for every call against that portal, so scope it to a
+ * portal that genuinely needs it.
+ */
+function privateAppOverride(pid: string): string | undefined {
+  const v = process.env[`HUBSPOT_PRIVATE_APP_TOKEN_${pid}`];
+  return v && v.trim() ? v.trim() : undefined;
+}
+
 export async function getValidToken(
   portalId: string | number,
   opts?: { force?: boolean }
 ): Promise<string> {
   const pid = String(portalId);
   const now = Date.now();
+
+  // Private-app tokens do not expire, so they bypass the cache and the refresh.
+  const override = privateAppOverride(pid);
+  if (override) return override;
 
   if (!opts?.force) {
     const cached = cache.get(pid);
