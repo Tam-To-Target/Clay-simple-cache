@@ -15,7 +15,7 @@
 
 import { emailbisonApiBase } from "./emailbison-token.service";
 
-export type SuppressStatus = "added" | "already_present" | "failed";
+export type SuppressStatus = "added" | "already_present" | "invalid" | "failed";
 
 export interface SuppressResult {
   status: SuppressStatus;
@@ -72,8 +72,13 @@ async function post(
         const id = body?.data?.id;
         return { status: "added", httpStatus: 201, providerId: typeof id === "number" ? id : undefined };
       }
-      if (res.status === 422 && isAlreadyTaken(body)) {
-        return { status: "already_present", httpStatus: 422 };
+      if (res.status === 422) {
+        // "already been taken" = already suppressed (success). Any OTHER 422 is a
+        // validation error (e.g. a malformed email in the DNC list) — permanent and
+        // non-retryable, so classify it "invalid" (a skip). It must NOT be a hard
+        // failure, or one bad row would hold the watermark and retry forever.
+        if (isAlreadyTaken(body)) return { status: "already_present", httpStatus: 422 };
+        return { status: "invalid", httpStatus: 422, error: `HTTP 422: ${JSON.stringify(body).slice(0, 160)}` };
       }
       // Retry transient server/rate errors; everything else is a hard fail.
       if (res.status === 429 || res.status >= 500) {

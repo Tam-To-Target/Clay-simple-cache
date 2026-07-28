@@ -54,8 +54,8 @@ export interface WorkspaceResult {
   workspace_id: number;
   workspace_name: string | null;
   status: WorkspaceStatus;
-  emails: { added: number; already: number; failed: number };
-  domains: { added: number; already: number; failed: number };
+  emails: { added: number; already: number; invalid: number; failed: number };
+  domains: { added: number; already: number; invalid: number; failed: number };
   watermark_advanced: boolean;
   /** On aborted_max: what the run WOULD have pushed (for the Slack alert). */
   capBlocked?: { emails: number; domains: number };
@@ -122,8 +122,8 @@ export async function runEmailbisonSuppress(
         workspace_id: ws.workspace_id,
         workspace_name: ws.workspace_name ?? null,
         status: "ok",
-        emails: { added: 0, already: 0, failed: 0 },
-        domains: { added: 0, already: 0, failed: 0 },
+        emails: { added: 0, already: 0, invalid: 0, failed: 0 },
+        domains: { added: 0, already: 0, invalid: 0, failed: 0 },
         watermark_advanced: false,
       };
 
@@ -228,10 +228,11 @@ export async function runEmailbisonSuppress(
         kind: "email" | "domain",
         value: string,
         r: SuppressResult,
-        bucket: { added: number; already: number; failed: number }
+        bucket: { added: number; already: number; invalid: number; failed: number }
       ) => {
         if (r.status === "added") bucket.added++;
         else if (r.status === "already_present") bucket.already++;
+        else if (r.status === "invalid") bucket.invalid++; // permanent skip — does NOT block the watermark
         else bucket.failed++;
         auditRows.push({
           client_id: client.id,
@@ -274,8 +275,8 @@ export async function runEmailbisonSuppress(
       results.push({ ...base, status: advance ? "ok" : "partial", watermark_advanced: advance });
       console.log(
         `[emailbison-suppress] ${client.external_id} ws ${ws.workspace_id}: ` +
-          `emails +${base.emails.added}/~${base.emails.already}/✗${base.emails.failed}, ` +
-          `domains +${base.domains.added}/~${base.domains.already}/✗${base.domains.failed}` +
+          `emails +${base.emails.added}/~${base.emails.already}/⊘${base.emails.invalid}/✗${base.emails.failed}, ` +
+          `domains +${base.domains.added}/~${base.domains.already}/⊘${base.domains.invalid}/✗${base.domains.failed}` +
           `${advance ? "" : " (watermark held — retry next run)"}`
       );
     }
