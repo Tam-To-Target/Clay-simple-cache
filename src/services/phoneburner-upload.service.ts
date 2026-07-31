@@ -1,20 +1,54 @@
 /**
  * Upload a list of leads into an SDR's PhoneBurner book (the programmatic
- * replacement for the manual "Clay → CSV import" flow), following the shared
- * dialing org's real convention (validated 2026-07-21, see SKILL-phoneburner-list.md):
+ * replacement for the manual "Clay → CSV import" flow).
  *
- *  - the org does NOT use per-client folders. A client is a TAG (its PascalCase
- *    client tag, e.g. "PlanIt"); a campaign is the tag "<ClientTag>: <Campaign>";
- *    the per-list identifier is a CUSTOM FIELD named "Lead Score" (e.g. "club8");
+ * CONVENTION — corrected 2026-07-30 against the GTME team's own Loom walkthrough
+ * of the manual process (see SKILL-phoneburner-list.md "The manual process"):
+ *
+ *  - the org does NOT use folders/categories. Three things live on a contact:
+ *      * TAGS: `fresh leads` + the client tag (e.g. "Club Hub") + the BARE
+ *        campaign name (e.g. "ISTE 2026 TAM"). All three are typed into the
+ *        import's tag box at 4:17 in the Loom.
+ *      * CUSTOM FIELD "Lead Score": the per-list identifier (e.g. "CLUB8").
+ *      * CUSTOM FIELD "Job Title": the row's title.
+ *  - ⚠️ `"<ClientTag>: <Campaign>"` is NOT a tag. It is the NAME of the SDR's
+ *    saved search (e.g. "ClubHub: Public School Signal-Based Targeting - 1st
+ *    Attempt"). An earlier reading of the process mis-transplanted that string
+ *    into `tags[]`, which meant our uploads did not match the tag filters the
+ *    SDRs' existing saved searches use. Fixed here.
+ *  - ⚠️ `attempt` is NOT a tag either. In the Loom (0:14–0:41) the attempt is a
+ *    DIAL-COUNT criterion inside the saved search — 0 dials = 1st attempt, 1 =
+ *    2nd, and so on — plus a suffix on the saved search's name. We keep the
+ *    `attempt` option, but it now feeds the `savedSearch` hint block instead of
+ *    polluting the contact's tags.
  *  - leads are created under the assigned SDR's own token (`owner_id` = their
  *    PhoneBurner member id);
  *  - PhoneBurner de-dupes on email/phone and MERGES on overlap. Setting Lead Score
  *    on a merged contact would OVERWRITE its prior list's — so we snapshot the
  *    seat's book first and stamp Lead Score on NET-NEW contacts only (existing
- *    contacts still get the new campaign tag, just not a new Lead Score);
+ *    contacts still get the new tags, just not a new Lead Score);
  *  - numbers on the client's DNC are scrubbed BEFORE upload (PHONEBURNER_DNC_PURGE_PLAN.md
  *    §9); the response reports coverage + every collision so "clean" and
  *    "unchecked" are never confused.
+ *
+ * SAVED SEARCH — there is no saved-search/smart-folder API, so that one step stays
+ * in the UI. But it only had to be redone per list because the SDR filtered on the
+ * per-list Lead Score. `tag = <client>` + `dials = 0` already isolates exactly
+ * "this client's never-dialed leads", so a STANDING saved search built once per
+ * client absorbs every later upload automatically. `savedSearch` in the response
+ * spells out both variants.
+ *
+ * FOLDERS — a earlier version of this comment claimed `/folders` creates "a static
+ * category that does not drive the dial queue". That was WRONG (corrected 2026-07-31
+ * after reading PhoneBurner's docs properly, see PB-list-manager/FINDINGS.md). A
+ * Contact Folder IS a first-class dial source: PhoneBurner's own flow is
+ * Contacts -> a folder OR a saved search -> tick -> Begin Dial Session. A folder just
+ * isn't a *dynamic* filter. `POST/PUT/DELETE /rest/1/folders` all exist, and
+ * `POST /contacts` already accepts `category_id`, so creating a folder per list and
+ * assigning contacts to it would remove the manual step entirely — with fewer SDR
+ * clicks than building a search. `resolveOrCreateFolder` at commit 6c9c5de is a
+ * usable starting point. Not implemented here yet; deliberate scope call, not a
+ * dead end.
  *
  * The Lead Score is minted by pb-lead-score.service (seeded once from GTMOS call
  * history by scripts/backfill-pb-convention.ts, then owned here). Custom fields
@@ -44,6 +78,10 @@ const LEAD_SCORE_FIELD = "Lead Score";
 const JOB_TITLE_FIELD = "Job Title";
 const CF_TYPE_TEXT = 1;
 
+/** Tag every freshly-imported lead carries (Loom 4:17). The SDRs' saved searches
+ *  filter on it, so omitting it hides the upload from their dial queue. */
+const FRESH_LEADS_TAG = "fresh leads";
+
 /** A resolvable SDR (PhoneBurner member) assigned to a client. */
 export interface SdrOption {
   pbMemberId: string;
@@ -68,11 +106,29 @@ export interface UploadOptions {
   campaign?: string;
   /** Explicit Lead Score override. Omit to auto-mint the next one for the client. */
   leadScore?: string;
-  attempt?: string;
+  /** Which dial pass this list is for ("first attempt" / "2nd" / 3 …). Drives the
+   *  `savedSearch` hint (name suffix + dial-count criterion) — NOT a contact tag. */
+  attempt?: string | number;
   tags?: string[];
+  /** Include the standard `fresh leads` tag. Default true — only turn this off for
+   *  a re-tag of leads that are already in the book. */
+  freshLeadsTag?: boolean;
   dncScrub?: boolean; // default true
   onDuplicate?: "skip" | "update"; // default "update" (so existing contacts gain the new tag)
   dryRun?: boolean;
+}
+
+/** What the SDR needs in the PhoneBurner UI. No API exists for saved searches, but
+ *  `standing` only has to be built ONCE per client — after that every upload for
+ *  that client lands in it with no UI work at all. */
+export interface SavedSearchPlan {
+  /** Always false: PhoneBurner exposes no saved-search/smart-folder endpoint. */
+  api_available: false;
+  /** Build once per client; absorbs all future uploads. */
+  standing: { name: string; criteria: string[]; build_once: true };
+  /** The legacy per-list folder — only needed to dial ONE list while another
+   *  un-dialed list is still pending for the same client. */
+  per_list: { name: string; criteria: string[] };
 }
 
 export interface UploadResult {
@@ -83,6 +139,7 @@ export interface UploadResult {
   clientTag: string;
   leadScore: { value: string; prefix: string; seq: number; issued: boolean } | null;
   tags: string[];
+  savedSearch: SavedSearchPlan;
   dnc: { scrubbed: boolean; entries_present: boolean; skipped: number };
   totals: {
     received: number;
@@ -176,8 +233,9 @@ export function selectSdr(sdrs: SdrOption[], query?: string): SdrOption {
 
 // ── Client tag ────────────────────────────────────────────────────────────────
 
-/** PascalCase fallback client tag from the client name (used only until the
- *  backfill sets `pb_client_tag` from real call history). "Club Hub" → "ClubHub". */
+/** PascalCase form of the client name. Two uses: the fallback contact tag when
+ *  `pb_client_tag` hasn't been backfilled yet, and the prefix of the saved
+ *  search's NAME (which the org writes closed-up: "ClubHub: …"). */
 export function deriveClientTag(name: string): string {
   const tag = name
     .split(/[^a-zA-Z0-9]+/)
@@ -185,6 +243,69 @@ export function deriveClientTag(name: string): string {
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join("");
   return tag || name.trim();
+}
+
+// ── Saved-search plan (the one manual step) ───────────────────────────────────
+
+const ATTEMPT_WORDS: Record<string, number> = {
+  first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6,
+};
+
+/** "first attempt" | "2nd" | 3 → the 1-based dial pass. Defaults to 1. */
+export function parseAttempt(attempt?: string | number): number {
+  if (typeof attempt === "number" && Number.isFinite(attempt)) return Math.max(1, Math.trunc(attempt));
+  const s = (attempt ?? "").toString().trim().toLowerCase();
+  if (!s) return 1;
+  const digits = s.match(/\d+/);
+  if (digits) return Math.max(1, Number(digits[0]));
+  for (const [word, n] of Object.entries(ATTEMPT_WORDS)) if (s.includes(word)) return n;
+  return 1;
+}
+
+/** 1 → "1st Attempt", 2 → "2nd Attempt" … matching the org's folder names. */
+export function attemptLabel(ordinal: number): string {
+  const rem100 = ordinal % 100;
+  const suffix =
+    rem100 >= 11 && rem100 <= 13 ? "th" : ["th", "st", "nd", "rd"][ordinal % 10] ?? "th";
+  return `${ordinal}${suffix} Attempt`;
+}
+
+/**
+ * The saved search the SDR builds in the UI. Criteria come straight from the
+ * Loom: tag + dial count + (per-list only) Lead Score.
+ *
+ * The dial-count criterion is why `standing` works: a list that has already been
+ * worked has dials >= 1 and falls out of the 1st-attempt folder by itself, so the
+ * per-list Lead Score filter is redundant for the normal "dial the new leads" path.
+ */
+export function planSavedSearch(args: {
+  clientName: string;
+  clientTag: string;
+  campaign: string | null;
+  leadScore: string | null;
+  attemptOrdinal: number;
+}): SavedSearchPlan {
+  const pascal = deriveClientTag(args.clientName);
+  const label = attemptLabel(args.attemptOrdinal);
+  const dials = args.attemptOrdinal - 1;
+  const dialCriterion = `dial attempts = ${dials}`;
+
+  return {
+    api_available: false,
+    standing: {
+      name: `${pascal}: ${label}`,
+      criteria: [`tag = ${args.clientTag}`, dialCriterion],
+      build_once: true,
+    },
+    per_list: {
+      name: `${pascal}: ${args.campaign ?? "(campaign)"} - ${label}`,
+      criteria: [
+        `tag = ${args.clientTag}`,
+        `${LEAD_SCORE_FIELD} = ${args.leadScore ?? "(lead score)"}`,
+        dialCriterion,
+      ],
+    },
+  };
 }
 
 // ── PhoneBurner REST helpers (create-side) ─────────────────────────────────────
@@ -357,19 +478,24 @@ export async function uploadContacts(
   const clientTag = client.pb_client_tag?.trim() || deriveClientTag(client.name);
   const campaign = options.campaign?.toString().trim() || null;
 
-  // Tags: bare client tag + "<ClientTag>: <Campaign>" + attempt + extras.
+  // Tags, exactly as the manual import types them (Loom 4:17): `fresh leads`,
+  // the client tag, the BARE campaign name, then any caller extras.
+  // NOT tags: "<ClientTag>: <Campaign>" (that's the saved search's name) and
+  // `attempt` (that's a dial-count criterion inside the saved search).
   const tags = Array.from(
     new Set(
       [
+        options.freshLeadsTag === false ? null : FRESH_LEADS_TAG,
         clientTag,
-        campaign ? `${clientTag}: ${campaign}` : null,
-        options.attempt,
+        campaign,
         ...(options.tags ?? []),
       ]
         .map((t) => (t ?? "").toString().trim())
         .filter(Boolean)
     )
   );
+
+  const attemptOrdinal = parseAttempt(options.attempt);
 
   // Normalize rows.
   const invalid: UploadResult["invalid"] = [];
@@ -469,6 +595,13 @@ export async function uploadContacts(
     clientTag,
     leadScore,
     tags,
+    savedSearch: planSavedSearch({
+      clientName: client.name,
+      clientTag,
+      campaign,
+      leadScore: leadScore?.value ?? null,
+      attemptOrdinal,
+    }),
     dnc: { scrubbed: dncScrub, entries_present: dncEntriesPresent, skipped: dncSkipped.length },
     totals: {
       received: contacts.length,

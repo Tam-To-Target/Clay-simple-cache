@@ -633,16 +633,18 @@ reported per member.
 
 Pushes a lead list into the assigned SDR's PhoneBurner dialing book — the
 programmatic replacement for the manual "Clay → CSV import" flow, following the
-shared dialing org's real convention (the account uses **tags + a \`Lead Score\`
-custom field**, not per-client folders):
+shared dialing org's real convention — verified against the GTME team's own Loom
+walkthrough of the manual process (the account uses **tags + custom fields**, never
+folders/categories):
 
-- **Tags**: the client's PascalCase tag (e.g. \`ClubHub\`) + a campaign tag
-  \`"<ClientTag>: <Campaign>"\` + any \`attempt\`/extra tags.
-- **Lead Score**: a custom field identifying this list (e.g. \`club8\`).
+- **Tags**: \`fresh leads\` + the client tag (e.g. \`Club Hub\`) + the **bare campaign
+  name** (e.g. \`ISTE 2026 TAM\`) + any extra \`tags\`. These are exactly the three
+  values the manual CSV import types into its tag box.
+- **Lead Score**: a custom field identifying this list (e.g. \`CLUB8\`).
   **Auto-minted** as the next value for the client (owned in-service; seeded once
   from GTMOS history) unless \`lead_score\` overrides it. Stamped on **net-new
   contacts only** — PhoneBurner merges duplicates on email/phone, so an
-  overlapping contact keeps its prior list's Lead Score (its new campaign tag is
+  overlapping contact keeps its prior list's Lead Score (its new tags are
   still added).
 - **Job Title**: \`title\` → the account's \`Job Title\` custom field.
 - Leads are created under the SDR's own token (\`owner_id\` = their member id).
@@ -650,10 +652,23 @@ custom field**, not per-client folders):
   (\`PHONEBURNER_DNC_PURGE_PLAN.md\` §9); the response's \`dnc\` block reports coverage
   and lists every collision.
 
-There is **no saved-search API** — the SDR still builds the smart folder in the
-PhoneBurner UI (filtered on the campaign tag or \`Lead Score\`); the contacts are
-already correct. SDR→client mapping is the same one the purge uses
-(\`phoneburner_members\`); tokens resolve from GTMOS (\`SDR_LAUNCH_INTERNAL_URL\`/\`_SECRET\`).
+⚠️ **Two things are NOT tags.** \`"<Client>: <Campaign> - Nth Attempt"\` is the *name
+of the SDR's saved search*, and the attempt is a *dial-count criterion inside* that
+search — not contact labels. An earlier reading of the process put both into
+\`tags[]\`, which meant uploads did not match the tag filters the SDRs' existing
+saved searches use.
+
+**The saved search (the one manual step).** PhoneBurner exposes no
+saved-search/smart-folder endpoint, so it is built in the UI. But it only had to be
+rebuilt per list because the SDR filtered on the per-list \`Lead Score\`. \`tag =
+<client>\` + \`dial attempts = 0\` already isolates exactly "this client's never-dialed
+leads" — a list that has been worked has ≥1 dial and drops out by itself. So a
+**standing** saved search built **once per client** absorbs every later upload with
+no UI work. The response's \`savedSearch\` block gives both the standing recipe and
+the legacy per-list one.
+
+SDR→client mapping is the same one the purge uses (\`phoneburner_members\`); tokens
+resolve from GTMOS (\`SDR_LAUNCH_INTERNAL_URL\`/\`_SECRET\`).
 
 **Request Body (JSON)**:
 | Field | Type | Required | Description |
@@ -661,10 +676,11 @@ already correct. SDR→client mapping is the same one the purge uses
 | \`client_id\` | String | Yes | Client \`external_id\` (slug). |
 | \`sdr\` | String | Conditional | slug \\| name \\| email \\| \`pb_member_id\`. Required only when >1 SDR is assigned; a \`409 {needs_sdr, sdrs[]}\` lists the choices. |
 | \`contacts\` | Array | Yes | Rows: a bare phone string, or \`{ phone, first_name?, last_name?, name?, company?, email?, title?, notes? }\`. \`phone\` required per row. |
-| \`campaign\` | String | No | Campaign name → the \`"<ClientTag>: <Campaign>"\` tag. |
-| \`lead_score\` | String | No | Override the auto-minted Lead Score (e.g. \`club8\`). Omit to auto-mint the next one. |
-| \`attempt\` | String | No | Added as a tag (e.g. \`first attempt\`). |
+| \`campaign\` | String | No | Campaign name → added as a **bare tag** (e.g. \`ISTE 2026 TAM\`) and used in the \`savedSearch\` name. |
+| \`lead_score\` | String | No | Override the auto-minted Lead Score (e.g. \`CLUB8\`). Omit to auto-mint the next one. |
+| \`attempt\` | String\\|Number | No | Which dial pass (\`first attempt\`, \`2nd\`, \`3\`; default 1). **Not a tag** — sets the \`savedSearch\` name suffix and its \`dial attempts = N-1\` criterion. |
 | \`tags\` | String[] | No | Extra tags. |
+| \`fresh_leads_tag\` | Boolean | No | Default \`true\`. Set \`false\` only when re-tagging leads already in the book. |
 | \`dnc_scrub\` | Boolean | No | Default \`true\`. \`false\` uploads everything unchecked. |
 | \`on_duplicate\` | String | No | \`update\` (default — existing contacts gain the new tag) or \`skip\`. |
 | \`dry_run\` | Boolean | No | Validate + DNC-scrub + preview (peeks the next Lead Score, mints/creates nothing). |
@@ -676,9 +692,21 @@ already correct. SDR→client mapping is the same one the purge uses
   "dryRun": false,
   "clientId": "club-hub",
   "sdr": { "pbMemberId": "111", "name": "Prince Derek", "slug": "prince-derek", "username": "prince@tamtotarget.com" },
-  "clientTag": "ClubHub",
-  "leadScore": { "value": "club8", "prefix": "club", "seq": 8, "issued": true },
-  "tags": ["ClubHub", "ClubHub: ISTE 2026 TAM", "first attempt"],
+  "clientTag": "Club Hub",
+  "leadScore": { "value": "CLUB8", "prefix": "CLUB", "seq": 8, "issued": true },
+  "tags": ["fresh leads", "Club Hub", "ISTE 2026 TAM"],
+  "savedSearch": {
+    "api_available": false,
+    "standing": {
+      "name": "ClubHub: 1st Attempt",
+      "criteria": ["tag = Club Hub", "dial attempts = 0"],
+      "build_once": true
+    },
+    "per_list": {
+      "name": "ClubHub: ISTE 2026 TAM - 1st Attempt",
+      "criteria": ["tag = Club Hub", "Lead Score = CLUB8", "dial attempts = 0"]
+    }
+  },
   "dnc": { "scrubbed": true, "entries_present": true, "skipped": 11 },
   "totals": { "received": 300, "invalid": 2, "dnc_skipped": 11, "attempted": 287, "net_new": 240, "overlap": 47, "uploaded": 285, "failed": 2 },
   "dnc_skipped": [{ "phone": "+1...", "email": null, "matched_on": "phone", "matched_value": "+1..." }],
@@ -689,6 +717,8 @@ already correct. SDR→client mapping is the same one the purge uses
 \`net_new\`/\`overlap\` are \`null\` when the seat's book couldn't be read (then Lead
 Score is stamped on all). \`dnc.entries_present:false\` means the client has no DNC
 data to scrub against — "clean" ≠ "unchecked". Detail arrays cap at 100; \`totals\` are exact.
+\`savedSearch.standing\` only needs building the first time for a given client +
+attempt pass; after that this endpoint is the whole job.
 
 **Errors**: \`400\` (missing \`client_id\`/\`contacts\`, GTMOS config absent, no active
 SDR, unknown \`sdr\`, or the chosen SDR has no PhoneBurner token), \`404\` (unknown

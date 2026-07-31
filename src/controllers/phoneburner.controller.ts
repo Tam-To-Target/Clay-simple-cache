@@ -71,14 +71,16 @@ export const phoneburnerController = {
    *   client_id,                       // client slug (required)
    *   sdr?,                            // slug | name | email | pb_member_id
    *                                    //   (required only when >1 SDR is assigned)
-   *   campaign?, lead_score?, attempt?, tags?,    // labeling (see service)
+   *   campaign?, lead_score?, attempt?, tags?, fresh_leads_tag? = true,  // labeling
    *   dnc_scrub? = true, on_duplicate? = "update", dry_run? = false,
    *   contacts: (string | { phone, first_name?, last_name?, name?, company?, email?, title?, notes? })[]
    * }
-   * Uploads a lead list into the assigned SDR's PhoneBurner book: client tag +
-   * "<ClientTag>: <Campaign>" tags, a "Lead Score" custom field (auto-minted for
-   * the client unless `lead_score` is given, stamped on net-new contacts only),
-   * scrubbing the client's DNC first by default.
+   * Uploads a lead list into the assigned SDR's PhoneBurner book with the org's
+   * real convention: tags `fresh leads` + client tag + bare campaign name, a
+   * "Lead Score" custom field (auto-minted for the client unless `lead_score` is
+   * given, stamped on net-new contacts only), scrubbing the client's DNC first by
+   * default. `attempt` is NOT a tag — it drives the `savedSearch` block in the
+   * response, which tells the SDR what to build once in the UI.
    *
    * When more than one SDR is assigned and `sdr` is missing/ambiguous, responds
    * 409 with { needs_sdr:true, sdrs:[…] } so the caller can pick.
@@ -93,6 +95,7 @@ export const phoneburnerController = {
         lead_group, // deprecated alias for lead_score
         attempt,
         tags,
+        fresh_leads_tag,
         dnc_scrub,
         on_duplicate,
         dry_run,
@@ -136,6 +139,7 @@ export const phoneburnerController = {
         leadScore: typeof lead_score === "string" ? lead_score : typeof lead_group === "string" ? lead_group : undefined,
         attempt,
         tags: Array.isArray(tags) ? tags : undefined,
+        freshLeadsTag: typeof fresh_leads_tag === "boolean" ? fresh_leads_tag : undefined,
         dncScrub: typeof dnc_scrub === "boolean" ? dnc_scrub : undefined,
         onDuplicate: on_duplicate === "skip" ? "skip" : on_duplicate === "update" ? "update" : undefined,
         dryRun: dry_run === true,

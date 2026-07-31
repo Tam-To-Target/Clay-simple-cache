@@ -9,8 +9,33 @@ allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 Push a CSV of contacts into the assigned SDR's PhoneBurner book by calling ONE
 service endpoint. The **Contact Platform** (a.k.a. Clay cache / TTT-api-service)
 owns all the convention logic now — you no longer discover tags, compute a Lead
-Score, or scrub DNC by hand. You convert the CSV to JSON, POST it, read the
-result, and (the one manual step) build the saved-search folder in the UI.
+Score, or scrub DNC by hand. You convert the CSV to JSON, POST it, and read the
+result.
+
+## The manual process this replaces (from the GTME team's Loom)
+
+| Loom step | Automated? |
+|---|---|
+| 0:00–1:28 Build the saved-search folder: tag = client, dial attempts = 0, `Lead Score = club8`; name it `<Client>: <Campaign> - 1st Attempt` | ❌ no API — but see Step 4, it becomes **once per client**, not once per list |
+| 1:28–2:05 Pull the list into Clay, filter phone-not-empty | ✅ rows without a phone come back in `invalid[]` |
+| 2:05–2:57 Clay formula stamping `club8` on every row | ✅ Lead Score auto-minted |
+| 2:57–4:17 CSV upload + column mapping (full name → first/last, title → Job Title, school → company, phone → Home) | ✅ |
+| 4:17–4:44 Type the import tags: `fresh leads`, `club hub`, `<campaign>` | ✅ |
+| 4:44 Complete import, verify the list landed in the folder | ✅ `totals` in the response |
+
+⚠️ **Two strings that look like tags are not tags.** `"<Client>: <Campaign> - Nth
+Attempt"` is the *name of the saved search*; the attempt is a *dial-count criterion
+inside* it. An earlier version of this skill put both in `tags[]`, so uploads did not
+match the tag filters the SDRs' existing saved searches use. Fixed 2026-07-30.
+
+ℹ️ **On automating the folder via `/folders`** — an earlier version of this file said
+not to, claiming a folder is "a static category that does not drive the dial queue."
+**That was wrong** (corrected 2026-07-31, see `PB-list-manager/FINDINGS.md`). A Contact
+Folder *is* a first-class dial source — PhoneBurner's flow is Contacts → a folder **or**
+a saved search → tick → Begin Dial Session. A folder simply isn't a *dynamic* filter.
+`POST/PUT/DELETE /rest/1/folders` exist and `POST /contacts` accepts `category_id`, so a
+folder-per-list would remove the manual step below entirely, with fewer SDR clicks than
+building a search. Not built yet — until it is, follow Step 4.
 
 ## Service + auth (only these endpoints, all in this one service)
 
@@ -39,11 +64,13 @@ itself and reports every collision. Do not build a separate scrub step.
 - **Lead Score.** Auto-minted as the next value for the client (e.g. `CLUB7 → CLUB8`).
   Pass `lead_score` ONLY to override (reuse/pin a specific one). It's stamped on
   **net-new contacts only** — an overlapping contact keeps its prior list's score.
-- **Tags.** The client tag + `"<ClientTag>: <Campaign>"` (from `campaign`) +
-  `attempt` + any `tags[]`.
+- **Tags.** `fresh leads` + the client tag (e.g. `Club Hub`) + the **bare** campaign
+  name (e.g. `ISTE 2026 TAM`) + any `tags[]`. Exactly what the manual import types.
 - **Job Title.** A row's `title` → the account's `Job Title` custom field.
 - **DNC.** Scrubbed before upload by default; `dnc_scrub:false` disables.
 - **Owner.** Created under the SDR's own PhoneBurner token.
+- **Saved-search recipe.** The response's `savedSearch` block tells you exactly what
+  the SDR needs in the UI — see Step 4.
 
 ## Step 0 — Resolve the client (BLOCKING)
 
@@ -136,12 +163,43 @@ jq -n --slurpfile c /tmp/contacts.json \
 
 Report `totals.uploaded` / `failed` / `net_new` / `overlap` and the recorded
 `leadScore.value` (`issued:true`). Investigate any `failed[]` (status + error).
+Then resolve `savedSearch` per Step 4 — usually "nothing to do".
 
-## Step 4 — The saved-search folder (MANUAL — no API)
+## Step 4 — The saved search (one-time per client, then never again)
 
-There is no saved-search endpoint. Tell the user to build the smart folder in the
-PhoneBurner UI, filtered on the campaign tag or `Lead Score = <value>` — that's
-their "check the saved search folder" step. The contacts are already correct.
+PhoneBurner has no saved-search/smart-folder API, so this stays in the UI. **But it
+does not have to be redone per list.** Read `savedSearch` from the response and act
+on it:
+
+```json
+"savedSearch": {
+  "api_available": false,
+  "standing":  { "name": "ClubHub: 1st Attempt",
+                 "criteria": ["tag = Club Hub", "dial attempts = 0"], "build_once": true },
+  "per_list":  { "name": "ClubHub: ISTE 2026 TAM - 1st Attempt",
+                 "criteria": ["tag = Club Hub", "Lead Score = CLUB8", "dial attempts = 0"] }
+}
+```
+
+**Prefer `standing`.** The only criterion that changed per list was the per-list
+`Lead Score`. Drop it and `tag = <client>` + `dial attempts = 0` already describes
+exactly "this client's never-dialed leads" — a list that's been worked has ≥1 dial
+and falls out on its own. So:
+
+- **First upload for a client** → tell the user to build `standing` once (name +
+  criteria verbatim). Say plainly that it is a one-time setup.
+- **Every upload after that** → nothing to do in the UI. Say so explicitly:
+  *"no folder work needed — the leads are already in `<standing.name>`."*
+- **`per_list` is the exception**, not the default. Offer it only when they need to
+  dial ONE list while another un-dialed list for the same client is still pending.
+
+Lead Score is still stamped on every net-new contact, so per-list attribution and
+reporting are unaffected by filtering on the tag instead.
+
+> Confirm once with whoever owns the account that the dial-count criterion is named
+> as expected in the search builder (the Loom shows "always start with zero … for
+> the second attempt put one", which is a dial count, but the exact field label
+> wasn't on screen). Everything else in the recipe is verbatim from the Loom.
 
 ## Options reference (request body)
 
@@ -150,9 +208,11 @@ their "check the saved search folder" step. The contacts are already correct.
 | `client_id` | Client slug (required). |
 | `sdr` | slug \| name \| email \| pb_member_id. Required only when >1 SDR. |
 | `contacts` | Array; `phone` required per row (see Step 1). |
-| `campaign` | → the `"<ClientTag>: <Campaign>"` tag. |
+| `campaign` | → a **bare** tag (`ISTE 2026 TAM`) + the `savedSearch` name. |
 | `lead_score` | Override the auto-minted Lead Score. Omit to auto-mint. |
-| `attempt`, `tags` | Extra tags. |
+| `attempt` | Dial pass (`first attempt` / `2nd` / `3`; default 1). **Not a tag** — drives `savedSearch`. |
+| `tags` | Extra tags, appended to the standard three. |
+| `fresh_leads_tag` | Default `true`. `false` only when re-tagging leads already in the book. |
 | `dnc_scrub` | Default `true`. |
 | `on_duplicate` | `update` (default — existing gains the new tag) or `skip`. |
 | `dry_run` | `true` = preview + mint/write nothing. |
@@ -171,3 +231,7 @@ their "check the saved search folder" step. The contacts are already correct.
 - **The service owns the convention** (seeded once from call history). If a
   client's minted Lead Score prefix looks wrong, that's a data/seed issue in the
   service — don't work around it here.
+- **`pb_client_tag` is the tag verbatim, spaces and all** (`Club Hub`, not
+  `ClubHub`). The PascalCase form appears only in the saved search's *name*. If a
+  client's `pb_client_tag` is unset the service falls back to PascalCase, which may
+  not match the SDR's existing tag — check the dry-run `tags[]` before applying.

@@ -43,6 +43,9 @@ import {
   resolveClientSdrs,
   selectSdr,
   deriveClientTag,
+  parseAttempt,
+  attemptLabel,
+  planSavedSearch,
   uploadContacts,
   UploadInputError,
   type SdrOption,
@@ -57,8 +60,10 @@ const issueMock = issueLeadScore as any;
 const peekMock = peekNextLeadScore as any;
 const recordMock = recordLeadScore as any;
 
+// pb_client_tag is the LIVE value the SDRs type into the import ("Club Hub", with
+// the space) — not the PascalCase form, which only names the saved search.
 const client = (over: Partial<any> = {}) =>
-  ({ id: "client-1", external_id: "club-hub", name: "Club Hub", active: true, pb_client_tag: "ClubHub", pb_lead_score_prefix: "club", ...over } as any);
+  ({ id: "client-1", external_id: "club-hub", name: "Club Hub", active: true, pb_client_tag: "Club Hub", pb_lead_score_prefix: "club", ...over } as any);
 
 const sdr = (over: Partial<SdrOption> = {}): SdrOption => ({
   pbMemberId: "111",
@@ -112,6 +117,58 @@ describe("deriveClientTag", () => {
   });
 });
 
+describe("parseAttempt / attemptLabel", () => {
+  it("reads words, digits and numbers; defaults to the first pass", () => {
+    expect(parseAttempt("first attempt")).toBe(1);
+    expect(parseAttempt("2nd")).toBe(2);
+    expect(parseAttempt("third attempt")).toBe(3);
+    expect(parseAttempt(4)).toBe(4);
+    expect(parseAttempt(undefined)).toBe(1);
+    expect(parseAttempt("nonsense")).toBe(1);
+  });
+
+  it("renders the org's ordinal labels", () => {
+    expect(attemptLabel(1)).toBe("1st Attempt");
+    expect(attemptLabel(2)).toBe("2nd Attempt");
+    expect(attemptLabel(3)).toBe("3rd Attempt");
+    expect(attemptLabel(4)).toBe("4th Attempt");
+    expect(attemptLabel(11)).toBe("11th Attempt");
+  });
+});
+
+describe("planSavedSearch", () => {
+  it("standing folder drops the per-list Lead Score so it absorbs later uploads", () => {
+    const plan = planSavedSearch({
+      clientName: "Club Hub",
+      clientTag: "Club Hub",
+      campaign: "ISTE 2026 TAM",
+      leadScore: "CLUB8",
+      attemptOrdinal: 1,
+    });
+
+    expect(plan.api_available).toBe(false);
+    expect(plan.standing).toEqual({
+      name: "ClubHub: 1st Attempt",
+      criteria: ["tag = Club Hub", "dial attempts = 0"],
+      build_once: true,
+    });
+    // The per-list variant matches the folders already in the account, e.g.
+    // "ClubHub: Public School Signal-Based Targeting - 1st Attempt".
+    expect(plan.per_list).toEqual({
+      name: "ClubHub: ISTE 2026 TAM - 1st Attempt",
+      criteria: ["tag = Club Hub", "Lead Score = CLUB8", "dial attempts = 0"],
+    });
+  });
+
+  it("maps the Nth attempt to N-1 dials", () => {
+    const plan = planSavedSearch({
+      clientName: "Club Hub", clientTag: "Club Hub", campaign: null, leadScore: null, attemptOrdinal: 3,
+    });
+    expect(plan.standing.name).toBe("ClubHub: 3rd Attempt");
+    expect(plan.standing.criteria).toContain("dial attempts = 2");
+  });
+});
+
 describe("resolveClientSdrs / selectSdr", () => {
   it("resolves active members and disambiguates slug collisions", async () => {
     mockPrisma.phoneburnerMember.findMany.mockResolvedValue([
@@ -138,7 +195,7 @@ describe("resolveClientSdrs / selectSdr", () => {
 });
 
 describe("uploadContacts", () => {
-  it("builds client+campaign tags and stamps Lead Score + Job Title as array custom fields", async () => {
+  it("tags exactly what the manual import types, and stamps Lead Score + Job Title as array custom fields", async () => {
     const fetchMock = contactFetch();
     (global as any).fetch = fetchMock;
 
@@ -149,18 +206,64 @@ describe("uploadContacts", () => {
       { campaign: "ISTE 2026 TAM", attempt: "first attempt" }
     );
 
-    expect(result.clientTag).toBe("ClubHub");
-    expect(result.tags).toEqual(["ClubHub", "ClubHub: ISTE 2026 TAM", "first attempt"]);
+    expect(result.clientTag).toBe("Club Hub");
+    // Loom 4:17: "fresh leads, club hub, then the name of the campaign".
+    expect(result.tags).toEqual(["fresh leads", "Club Hub", "ISTE 2026 TAM"]);
     expect(result.leadScore).toEqual({ prefix: "club", seq: 9, value: "club9", issued: true });
     expect(issueMock).toHaveBeenCalledTimes(1);
 
     const body = bodiesOf(fetchMock)[0];
     expect(body).toMatchObject({ owner_id: "111", on_duplicate: "update" });
-    expect(body).not.toHaveProperty("category_id"); // folders are gone
+    expect(body).not.toHaveProperty("category_id"); // folders/categories are not the convention
+    expect(body.tags).toEqual(["fresh leads", "Club Hub", "ISTE 2026 TAM"]);
     expect(body.custom_fields).toEqual([
       { name: "Job Title", type: 1, value: "CTO" },
       { name: "Lead Score", type: 1, value: "club9" },
     ]);
+  });
+
+  it("keeps '<Client>: <Campaign>' and the attempt OUT of tags (they name/filter the saved search)", async () => {
+    (global as any).fetch = contactFetch();
+
+    const result = await uploadContacts(
+      client(),
+      sdr(),
+      [{ phone: "+12128675309", first_name: "Ada" }],
+      { campaign: "ISTE 2026 TAM", attempt: "2nd attempt" }
+    );
+
+    expect(result.tags).not.toContain("Club Hub: ISTE 2026 TAM");
+    expect(result.tags).not.toContain("2nd attempt");
+    expect(result.savedSearch.standing.name).toBe("ClubHub: 2nd Attempt");
+    expect(result.savedSearch.standing.criteria).toContain("dial attempts = 1");
+    expect(result.savedSearch.per_list.name).toBe("ClubHub: ISTE 2026 TAM - 2nd Attempt");
+  });
+
+  it("fresh_leads_tag:false drops the fresh-leads tag (re-tagging leads already in the book)", async () => {
+    (global as any).fetch = contactFetch();
+
+    const result = await uploadContacts(
+      client(),
+      sdr(),
+      [{ phone: "+12128675309", first_name: "Ada" }],
+      { campaign: "ISTE 2026 TAM", freshLeadsTag: false }
+    );
+
+    expect(result.tags).toEqual(["Club Hub", "ISTE 2026 TAM"]);
+  });
+
+  it("falls back to the PascalCase tag when pb_client_tag is unset", async () => {
+    (global as any).fetch = contactFetch();
+
+    const result = await uploadContacts(
+      client({ pb_client_tag: null }),
+      sdr(),
+      [{ phone: "+12128675309", first_name: "Ada" }],
+      {}
+    );
+
+    expect(result.clientTag).toBe("ClubHub");
+    expect(result.tags).toEqual(["fresh leads", "ClubHub"]);
   });
 
   it("stamps Lead Score on net-new only; existing (overlap) contacts keep theirs", async () => {
