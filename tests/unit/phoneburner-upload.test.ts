@@ -83,9 +83,21 @@ function makeRes(status: number, body: any) {
   } as any;
 }
 
-// Contact-POST fetch mock (book snapshot goes through fetchMemberContacts, not fetch).
-function contactFetch(onFail?: (phone: string) => any) {
+// Contact-POST + folder fetch mock (book snapshot goes through fetchMemberContacts).
+// `folders` seeds the pre-existing folder list; a POST /folders appends and echoes back.
+function contactFetch(onFail?: (phone: string) => any, opts: { folders?: Array<{ folder_id: string; folder_name: string }> } = {}) {
+  const folders = [...(opts.folders ?? [])];
+  let nextFolderId = 900;
   return vi.fn(async (url: string, init: any) => {
+    if (url.includes("/folders") && (init?.method ?? "GET") === "GET") {
+      return makeRes(200, { folders: { folders } });
+    }
+    if (url.includes("/folders") && init?.method === "POST") {
+      const { name } = JSON.parse(init.body);
+      const created = { folder_id: String(nextFolderId++), folder_name: name };
+      folders.push(created);
+      return makeRes(200, { folder: created });
+    }
     if (url.includes("/contacts") && init?.method === "POST") {
       const body = JSON.parse(init.body);
       const bad = onFail?.(body.phone);
@@ -94,6 +106,9 @@ function contactFetch(onFail?: (phone: string) => any) {
     throw new Error(`unexpected fetch: ${init?.method} ${url}`);
   });
 }
+
+const folderCalls = (fetchMock: any, method: string) =>
+  fetchMock.mock.calls.filter((c: any) => c[0].includes("/folders") && (c[1]?.method ?? "GET") === method);
 
 const bodiesOf = (fetchMock: any) =>
   fetchMock.mock.calls.filter((c: any) => c[0].includes("/contacts") && c[1]?.method === "POST").map((c: any) => JSON.parse(c[1].body));
@@ -214,12 +229,146 @@ describe("uploadContacts", () => {
 
     const body = bodiesOf(fetchMock)[0];
     expect(body).toMatchObject({ owner_id: "111", on_duplicate: "update" });
-    expect(body).not.toHaveProperty("category_id"); // folders/categories are not the convention
     expect(body.tags).toEqual(["fresh leads", "Club Hub", "ISTE 2026 TAM"]);
     expect(body.custom_fields).toEqual([
       { name: "Job Title", type: 1, value: "CTO" },
       { name: "Lead Score", type: 1, value: "club9" },
     ]);
+  });
+
+  it("creates the dial folder, files contacts into it, and reports nothing left to build", async () => {
+    const fetchMock = contactFetch();
+    (global as any).fetch = fetchMock;
+
+    const result = await uploadContacts(
+      client(),
+      sdr(),
+      [{ phone: "+12128675309", first_name: "Ada" }, { phone: "+14084567890", first_name: "Bob" }],
+      { campaign: "ISTE 2026 TAM" }
+    );
+
+    // Folder named by the org's own per-list convention.
+    expect(result.folder).toMatchObject({
+      name: "ClubHub: ISTE 2026 TAM - 1st Attempt",
+      created: true,
+      would_create: false,
+      assigned: 2,
+      left_in_place: 0,
+    });
+    expect(folderCalls(fetchMock, "POST")).toHaveLength(1);
+
+    // Every contact carries the folder id as category_id.
+    for (const body of bodiesOf(fetchMock)) expect(body.category_id).toBe(result.folder!.id);
+
+    // The whole point: the SDR has nothing to build.
+    expect(result.savedSearch.needed).toBe(false);
+    expect(result.savedSearch.reason).toContain("Nothing to build");
+  });
+
+  it("reuses an existing folder instead of creating a duplicate (case-insensitive)", async () => {
+    const fetchMock = contactFetch(undefined, {
+      folders: [{ folder_id: "77", folder_name: "clubhub: iste 2026 tam - 1st attempt" }],
+    });
+    (global as any).fetch = fetchMock;
+
+    const result = await uploadContacts(client(), sdr(), [{ phone: "+12128675309" }], { campaign: "ISTE 2026 TAM" });
+
+    expect(result.folder).toMatchObject({ id: "77", created: false, assigned: 1 });
+    expect(folderCalls(fetchMock, "POST")).toHaveLength(0);
+    expect(bodiesOf(fetchMock)[0].category_id).toBe("77");
+  });
+
+  it("leaves OVERLAPPING contacts in their current folder by default, and says so", async () => {
+    // Bob is already in the book → overlap. A contact has one category_id, so moving
+    // him could yank him out of a list the SDR is mid-way through.
+    fetchBookMock.mockResolvedValue([
+      { id: "x", emails: ["bob@x.com"], phones: [], category: null, do_not_call: false, raw: {} },
+    ]);
+    const fetchMock = contactFetch();
+    (global as any).fetch = fetchMock;
+
+    const result = await uploadContacts(
+      client(),
+      sdr(),
+      [
+        { phone: "+12128675309", first_name: "Ada", email: "ada@x.com" }, // net-new
+        { phone: "+14084567890", first_name: "Bob", email: "bob@x.com" }, // overlap
+      ],
+      { campaign: "ISTE 2026 TAM", dncScrub: false }
+    );
+
+    expect(result.folder).toMatchObject({ assigned: 1, left_in_place: 1 });
+    const [ada, bob] = bodiesOf(fetchMock);
+    expect(ada.category_id).toBe(result.folder!.id);
+    expect(bob).not.toHaveProperty("category_id");
+
+    // Partial folder → be honest that UI work may remain.
+    expect(result.savedSearch.needed).toBe(true);
+    expect(result.savedSearch.reason).toContain("stayed in their existing folder");
+  });
+
+  it("folder_assign:'all' moves overlaps into the folder too", async () => {
+    fetchBookMock.mockResolvedValue([
+      { id: "x", emails: ["bob@x.com"], phones: [], category: null, do_not_call: false, raw: {} },
+    ]);
+    const fetchMock = contactFetch();
+    (global as any).fetch = fetchMock;
+
+    const result = await uploadContacts(
+      client(),
+      sdr(),
+      [
+        { phone: "+12128675309", first_name: "Ada", email: "ada@x.com" },
+        { phone: "+14084567890", first_name: "Bob", email: "bob@x.com" },
+      ],
+      { campaign: "ISTE 2026 TAM", dncScrub: false, folderAssign: "all" }
+    );
+
+    expect(result.folder).toMatchObject({ assigned: 2, left_in_place: 0 });
+    for (const body of bodiesOf(fetchMock)) expect(body.category_id).toBe(result.folder!.id);
+    expect(result.savedSearch.needed).toBe(false);
+  });
+
+  it("folder_assign:'none' touches no folders and falls back to the saved-search recipe", async () => {
+    const fetchMock = contactFetch();
+    (global as any).fetch = fetchMock;
+
+    const result = await uploadContacts(client(), sdr(), [{ phone: "+12128675309" }], {
+      campaign: "ISTE 2026 TAM",
+      folderAssign: "none",
+    });
+
+    expect(result.folder).toBeNull();
+    expect(fetchMock.mock.calls.filter((c: any) => c[0].includes("/folders"))).toHaveLength(0);
+    expect(bodiesOf(fetchMock)[0]).not.toHaveProperty("category_id");
+    expect(result.savedSearch.needed).toBe(true);
+    expect(result.savedSearch.reason).toContain("No dial folder");
+  });
+
+  it("honors an explicit folder name override", async () => {
+    const fetchMock = contactFetch();
+    (global as any).fetch = fetchMock;
+
+    const result = await uploadContacts(client(), sdr(), [{ phone: "+12128675309" }], {
+      campaign: "ISTE 2026 TAM",
+      folder: "Club Hub — ISTE booth follow-up",
+    });
+
+    expect(result.folder!.name).toBe("Club Hub — ISTE booth follow-up");
+    expect(JSON.parse(folderCalls(fetchMock, "POST")[0][1].body).name).toBe("Club Hub — ISTE booth follow-up");
+  });
+
+  it("surfaces a folder-creation failure as a 502 rather than uploading unfiled contacts", async () => {
+    // 400, not 500 — withRetry backs 5xx off exponentially (correct in prod, slow in a test).
+    (global as any).fetch = vi.fn(async (url: string, init: any) => {
+      if (url.includes("/folders") && (init?.method ?? "GET") === "GET") return makeRes(200, { folders: { folders: [] } });
+      if (url.includes("/folders")) return makeRes(400, "invalid folder name");
+      throw new Error("must not POST contacts when the folder failed");
+    });
+
+    await expect(
+      uploadContacts(client(), sdr(), [{ phone: "+12128675309" }], { campaign: "ISTE 2026 TAM" })
+    ).rejects.toMatchObject({ status: 502, message: expect.stringContaining("invalid folder name") });
   });
 
   it("keeps '<Client>: <Campaign>' and the attempt OUT of tags (they name/filter the saved search)", async () => {
@@ -326,16 +475,33 @@ describe("uploadContacts", () => {
     expect(bodiesOf(fetchMock)[0].custom_fields).toContainEqual({ name: "Lead Score", type: 1, value: "club9" });
   });
 
-  it("dry_run peeks the Lead Score, creates nothing, records nothing", async () => {
-    const fetchMock = vi.fn(async () => { throw new Error("dry_run must not POST contacts"); });
+  it("dry_run peeks the Lead Score and writes NOTHING (folder lookup is read-only)", async () => {
+    const fetchMock = contactFetch();
     (global as any).fetch = fetchMock;
 
-    const result = await uploadContacts(client(), sdr(), [{ phone: "+12128675309" }], { dryRun: true });
+    const result = await uploadContacts(client(), sdr(), [{ phone: "+12128675309" }], {
+      campaign: "ISTE 2026 TAM",
+      dryRun: true,
+    });
     expect(result.dryRun).toBe(true);
     expect(result.leadScore).toEqual({ prefix: "club", seq: 9, value: "club9", issued: false });
     expect(peekMock).toHaveBeenCalledTimes(1);
     expect(issueMock).not.toHaveBeenCalled();
-    expect(fetchMock).not.toHaveBeenCalled(); // no /contacts POST
+
+    // A dry run may READ (to report whether the folder exists) but must never write.
+    const posts = fetchMock.mock.calls.filter((c: any) => c[1]?.method === "POST");
+    expect(posts).toHaveLength(0);
+    expect(folderCalls(fetchMock, "GET")).toHaveLength(1);
+
+    // ...and it reports what WOULD happen.
+    expect(result.folder).toMatchObject({
+      id: null,
+      name: "ClubHub: ISTE 2026 TAM - 1st Attempt",
+      created: false,
+      would_create: true,
+      assigned: 1,
+      left_in_place: 0,
+    });
   });
 
   it("records (does not mint) an explicit lead_score override", async () => {

@@ -38,17 +38,19 @@
  * client absorbs every later upload automatically. `savedSearch` in the response
  * spells out both variants.
  *
- * FOLDERS — a earlier version of this comment claimed `/folders` creates "a static
- * category that does not drive the dial queue". That was WRONG (corrected 2026-07-31
- * after reading PhoneBurner's docs properly, see PB-list-manager/FINDINGS.md). A
- * Contact Folder IS a first-class dial source: PhoneBurner's own flow is
- * Contacts -> a folder OR a saved search -> tick -> Begin Dial Session. A folder just
- * isn't a *dynamic* filter. `POST/PUT/DELETE /rest/1/folders` all exist, and
- * `POST /contacts` already accepts `category_id`, so creating a folder per list and
- * assigning contacts to it would remove the manual step entirely — with fewer SDR
- * clicks than building a search. `resolveOrCreateFolder` at commit 6c9c5de is a
- * usable starting point. Not implemented here yet; deliberate scope call, not a
- * dead end.
+ * FOLDERS — this is what makes the flow end-to-end (added 2026-07-31, see
+ * PB-list-manager/FINDINGS.md). A Contact Folder IS a first-class dial source:
+ * PhoneBurner's own flow is Contacts -> a folder OR a saved search -> tick -> Begin
+ * Dial Session. A folder just isn't a *dynamic* filter, which is the only reason the
+ * team reached for a saved search. So we create a folder per list
+ * (`resolveOrCreateFolder`) and file the contacts into it via `category_id` — the SDR
+ * picks the folder and dials, with nothing to build. `savedSearch.needed` reports
+ * whether any UI work remains.
+ *
+ * ⚠️ A contact has exactly ONE `category_id`. Filing an OVERLAPPING contact would
+ * move it out of the folder it currently sits in — possibly one the SDR is mid-way
+ * through dialing. So `folderAssign` defaults to `net_new`, the same safety rule
+ * Lead Score uses. `all` overrides it; `none` restores the pre-2026-07-31 behaviour.
  *
  * The Lead Score is minted by pb-lead-score.service (seeded once from GTMOS call
  * history by scripts/backfill-pb-convention.ts, then owned here). Custom fields
@@ -61,7 +63,7 @@ import type { Client } from "@prisma/client";
 import { normalizeEmail, normalizePhone } from "./normalization";
 import { normalizeCheckIdentifiers, dncService } from "./dnc.service";
 import { getMemberToken } from "./phoneburner-token.service";
-import { phoneburnerApiBase } from "./phoneburner-token.service";
+import { phoneburnerApiBase, flattenPbCollection } from "./phoneburner-token.service";
 import { fetchMemberContacts, PhoneburnerAccessError } from "./phoneburner.service";
 import { withRetry, createThrottle, mapWithConcurrency } from "./http-retry";
 import { loadRegistry, slugify } from "../config/registry";
@@ -113,20 +115,53 @@ export interface UploadOptions {
   /** Include the standard `fresh leads` tag. Default true — only turn this off for
    *  a re-tag of leads that are already in the book. */
   freshLeadsTag?: boolean;
+  /** Override the dial folder's name. Default = the org's per-list convention,
+   *  `"<PascalClient>: <Campaign> - <Nth> Attempt"`. */
+  folder?: string;
+  /**
+   * Which contacts get assigned to the dial folder.
+   *  - `net_new` (default): net-new contacts only. A contact has exactly ONE
+   *    `category_id`, so assigning an overlapping contact would MOVE it out of the
+   *    folder it currently sits in — possibly one the SDR is mid-way through
+   *    dialing. Same safety rule as Lead Score.
+   *  - `all`: assign every uploaded contact, moving overlaps into this folder.
+   *  - `none`: don't touch folders at all (pre-2026-07-31 behaviour).
+   */
+  folderAssign?: "net_new" | "all" | "none";
   dncScrub?: boolean; // default true
   onDuplicate?: "skip" | "update"; // default "update" (so existing contacts gain the new tag)
   dryRun?: boolean;
 }
 
-/** What the SDR needs in the PhoneBurner UI. No API exists for saved searches, but
- *  `standing` only has to be built ONCE per client — after that every upload for
- *  that client lands in it with no UI work at all. */
+/** The dial folder this upload targets. A folder is a first-class dial source in
+ *  PhoneBurner (Contacts → folder → Begin Dial Session), so when we create one the
+ *  SDR has nothing to build in the UI. */
+export interface FolderResult {
+  id: string | null; // null in a dry run when the folder doesn't exist yet
+  name: string;
+  created: boolean;
+  /** True in a dry run when the folder is absent and WOULD be created on apply. */
+  would_create: boolean;
+  /** How many uploaded contacts were filed into it. */
+  assigned: number;
+  /** Overlapping contacts deliberately left in their existing folder
+   *  (`folderAssign:"net_new"`). Non-zero means the folder is not the full list. */
+  left_in_place: number;
+}
+
+/** What the SDR still needs in the PhoneBurner UI. No API exists for saved searches,
+ *  but a folder is an equally valid dial source — so when this upload filed every
+ *  contact into a folder, `needed` is false and there is nothing to build. */
 export interface SavedSearchPlan {
   /** Always false: PhoneBurner exposes no saved-search/smart-folder endpoint. */
   api_available: false;
+  /** Whether the SDR has to build anything at all. False = dial the folder. */
+  needed: boolean;
+  /** Plain-English why, safe to show the user verbatim. */
+  reason: string;
   /** Build once per client; absorbs all future uploads. */
   standing: { name: string; criteria: string[]; build_once: true };
-  /** The legacy per-list folder — only needed to dial ONE list while another
+  /** The legacy per-list search — only needed to dial ONE list while another
    *  un-dialed list is still pending for the same client. */
   per_list: { name: string; criteria: string[] };
 }
@@ -139,6 +174,7 @@ export interface UploadResult {
   clientTag: string;
   leadScore: { value: string; prefix: string; seq: number; issued: boolean } | null;
   tags: string[];
+  folder: FolderResult | null; // null only when folderAssign:"none"
   savedSearch: SavedSearchPlan;
   dnc: { scrubbed: boolean; entries_present: boolean; skipped: number };
   totals: {
@@ -251,6 +287,37 @@ const ATTEMPT_WORDS: Record<string, number> = {
   first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6,
 };
 
+/** Does the SDR still have to build something in the UI? A folder is a valid dial
+ *  source, so a folder holding the whole list means "no". */
+export function savedSearchNeed(folder: FolderResult | null): { needed: boolean; reason: string } {
+  if (!folder) {
+    return {
+      needed: true,
+      reason: "No dial folder was created (folderAssign:\"none\") — the SDR must select the contacts themselves.",
+    };
+  }
+  if (folder.left_in_place > 0) {
+    return {
+      needed: true,
+      reason:
+        `Folder "${folder.name}" holds the ${folder.assigned} net-new contacts, but ` +
+        `${folder.left_in_place} overlapping contact(s) stayed in their existing folder. ` +
+        `Dial the folder for the new leads, or build the search / re-run with folderAssign:"all" ` +
+        `to pull the overlaps in too.`,
+    };
+  }
+  if (folder.assigned === 0) {
+    return {
+      needed: false,
+      reason: `Nothing was uploaded, so there is nothing to dial. Folder "${folder.name}" is ready for the next run.`,
+    };
+  }
+  return {
+    needed: false,
+    reason: `Nothing to build — all ${folder.assigned} contacts are in folder "${folder.name}". The SDR opens Contacts, picks that folder, and hits Begin Dial Session.`,
+  };
+}
+
 /** "first attempt" | "2nd" | 3 → the 1-based dial pass. Defaults to 1. */
 export function parseAttempt(attempt?: string | number): number {
   if (typeof attempt === "number" && Number.isFinite(attempt)) return Math.max(1, Math.trunc(attempt));
@@ -284,14 +351,20 @@ export function planSavedSearch(args: {
   campaign: string | null;
   leadScore: string | null;
   attemptOrdinal: number;
+  /** The folder this upload filed contacts into, if any. */
+  folder?: FolderResult | null;
 }): SavedSearchPlan {
   const pascal = deriveClientTag(args.clientName);
   const label = attemptLabel(args.attemptOrdinal);
   const dials = args.attemptOrdinal - 1;
   const dialCriterion = `dial attempts = ${dials}`;
 
+  const { needed, reason } = savedSearchNeed(args.folder ?? null);
+
   return {
     api_available: false,
+    needed,
+    reason,
     standing: {
       name: `${pascal}: ${label}`,
       criteria: [`tag = ${args.clientTag}`, dialCriterion],
@@ -334,6 +407,82 @@ async function pbUploadFetch(
   );
 }
 
+// ── Folders (the dial target) ─────────────────────────────────────────────────
+
+interface PbFolder {
+  id: string;
+  name: string;
+}
+
+/** A PhoneBurner folder leaf: has a folder_id (or duplicated `id`) + folder_name. */
+function isFolderLeaf(o: any): boolean {
+  return !!o && typeof o === "object" && (o.folder_id !== undefined || o.folder_name !== undefined);
+}
+function folderOf(o: any): PbFolder | null {
+  const id = o?.folder_id ?? o?.id;
+  const name = o?.folder_name ?? o?.name;
+  if (id === undefined || name === undefined) return null;
+  return { id: String(id), name: String(name) };
+}
+
+const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/** Look a folder up by name (case-insensitive). Read-only — safe in a dry run.
+ *  Returns null if the listing failed, so callers can't mistake "couldn't check"
+ *  for "absent". */
+export async function findFolderByName(
+  getToken: TokenGetter,
+  name: string,
+  throttle: () => Promise<void>
+): Promise<PbFolder | null> {
+  const res = await pbUploadFetch(`/folders?page_size=300`, getToken, { method: "GET" }, throttle);
+  if (!res.ok) return null;
+  const json: any = await res.json().catch(() => ({}));
+  const env = json?.folders ?? json;
+  const folders = flattenPbCollection(env?.folders ?? env?.data ?? env, isFolderLeaf)
+    .map(folderOf)
+    .filter((f): f is PbFolder => !!f);
+  return folders.find((f) => sameName(f.name, name)) ?? null;
+}
+
+/**
+ * Find a folder by name, creating it if absent. A contact's `category_id` IS a
+ * folder id from here, and a folder is a first-class dial source — so this is what
+ * removes the manual "build the saved search" step.
+ */
+export async function resolveOrCreateFolder(
+  getToken: TokenGetter,
+  name: string,
+  throttle: () => Promise<void>
+): Promise<{ id: string; name: string; created: boolean }> {
+  const existing = await findFolderByName(getToken, name, throttle);
+  if (existing) return { ...existing, created: false };
+
+  const res = await pbUploadFetch(
+    `/folders`,
+    getToken,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) },
+    throttle
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new UploadInputError(
+      `PhoneBurner POST /folders failed for "${name}": HTTP ${res.status} ${body.slice(0, 200)}`,
+      502
+    );
+  }
+  const json: any = await res.json().catch(() => ({}));
+  const [leaf] = flattenPbCollection(json?.folder ?? json?.folders ?? json, isFolderLeaf);
+  const folder = folderOf(leaf);
+  if (folder) return { ...folder, created: true };
+
+  // Created but the id wasn't in the response body — re-read rather than fail, so a
+  // shape change in PB's create response can't strand the upload.
+  const reread = await findFolderByName(getToken, name, throttle);
+  if (reread) return { ...reread, created: true };
+  throw new UploadInputError(`PhoneBurner created folder "${name}" but returned no id`, 502);
+}
+
 interface NormalizedContact {
   phoneE164: string;
   firstName: string;
@@ -355,7 +504,7 @@ async function createPbContact(
   getToken: TokenGetter,
   ownerId: string,
   c: NormalizedContact,
-  opts: { tags: string[]; leadScore: string | null; onDuplicate: "skip" | "update" },
+  opts: { tags: string[]; leadScore: string | null; categoryId: string | null; onDuplicate: "skip" | "update" },
   throttle: () => Promise<void>
 ): Promise<CreateContactResult> {
   // Custom fields MUST be the array shape; a dict silently persists nothing.
@@ -377,6 +526,9 @@ async function createPbContact(
   if (c.email) body.email = c.email;
   if (c.company) body.company = c.company;
   if (c.notes) body.notes = c.notes;
+  // A contact lives in exactly ONE folder, so the caller decides who gets filed
+  // (net-new only by default) — see UploadOptions.folderAssign.
+  if (opts.categoryId) body.category_id = opts.categoryId;
   if (customFields.length) body.custom_fields = customFields;
 
   const res = await pbUploadFetch(
@@ -562,12 +714,58 @@ export async function uploadContacts(
     else overlap!++;
   }
 
+  // ── Dial folder ────────────────────────────────────────────────────────────
+  // A folder is a first-class dial source, so filing the list into one removes the
+  // manual "build the saved search" step. Resolved AFTER the book snapshot (we need
+  // net-new status to decide who gets filed) and BEFORE the create loop.
+  const folderAssign = options.folderAssign ?? "net_new";
+  const folderName =
+    options.folder?.toString().trim() ||
+    planSavedSearch({ clientName: client.name, clientTag, campaign, leadScore: leadScore.value, attemptOrdinal })
+      .per_list.name;
+
+  /** A contact lives in exactly one folder — only file the ones the caller allows. */
+  const shouldFile = (c: NormalizedContact): boolean =>
+    folderAssign === "all" || (folderAssign === "net_new" && isNetNew(c));
+
+  let folder: FolderResult | null = null;
+  if (folderAssign !== "none") {
+    const plannedAssigned = survivors.filter(shouldFile).length;
+    const plannedLeft = survivors.length - plannedAssigned;
+
+    if (!token0) {
+      // Can't reach PhoneBurner at all — report the intent, don't guess existence.
+      folder = { id: null, name: folderName, created: false, would_create: false, assigned: 0, left_in_place: plannedLeft };
+    } else if (dryRun) {
+      const existing = await findFolderByName(getToken, folderName, throttle);
+      folder = {
+        id: existing?.id ?? null,
+        name: existing?.name ?? folderName,
+        created: false,
+        would_create: !existing,
+        assigned: plannedAssigned,
+        left_in_place: plannedLeft,
+      };
+    } else {
+      const resolved = await resolveOrCreateFolder(getToken, folderName, throttle);
+      folder = {
+        id: resolved.id,
+        name: resolved.name,
+        created: resolved.created,
+        would_create: false,
+        assigned: 0, // filled in from the create loop below
+        left_in_place: plannedLeft,
+      };
+    }
+  }
+
   const failed: UploadResult["failed"] = [];
   let uploaded = 0;
 
   if (!dryRun && survivors.length > 0) {
-    const results = await mapWithConcurrency(survivors, UPLOAD_CONCURRENCY, (c) =>
-      createPbContact(
+    const results = await mapWithConcurrency(survivors, UPLOAD_CONCURRENCY, (c) => {
+      const categoryId = folder?.id && shouldFile(c) ? folder.id : null;
+      return createPbContact(
         getToken,
         sdr.pbMemberId,
         c,
@@ -576,14 +774,19 @@ export async function uploadContacts(
           // Lead Score only on net-new (or when we couldn't read the book, in
           // which case we fall back to stamping all — matches prior behavior).
           leadScore: isNetNew(c) ? leadScore!.value : null,
+          categoryId,
           onDuplicate,
         },
         throttle
-      ).then((r) => ({ c, r }))
-    );
-    for (const { c, r } of results) {
-      if (r.ok) uploaded++;
-      else failed.push({ phone: c.phoneE164, status: r.status, error: r.error ?? "unknown error" });
+      ).then((r) => ({ c, r, filed: categoryId !== null }));
+    });
+    for (const { c, r, filed } of results) {
+      if (r.ok) {
+        uploaded++;
+        if (filed && folder) folder.assigned++;
+      } else {
+        failed.push({ phone: c.phoneE164, status: r.status, error: r.error ?? "unknown error" });
+      }
     }
   }
 
@@ -595,12 +798,14 @@ export async function uploadContacts(
     clientTag,
     leadScore,
     tags,
+    folder,
     savedSearch: planSavedSearch({
       clientName: client.name,
       clientTag,
       campaign,
       leadScore: leadScore?.value ?? null,
       attemptOrdinal,
+      folder,
     }),
     dnc: { scrubbed: dncScrub, entries_present: dncEntriesPresent, skipped: dncSkipped.length },
     totals: {

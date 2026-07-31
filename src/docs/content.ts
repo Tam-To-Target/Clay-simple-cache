@@ -658,14 +658,26 @@ search — not contact labels. An earlier reading of the process put both into
 \`tags[]\`, which meant uploads did not match the tag filters the SDRs' existing
 saved searches use.
 
-**The saved search (the one manual step).** PhoneBurner exposes no
-saved-search/smart-folder endpoint, so it is built in the UI. But it only had to be
-rebuilt per list because the SDR filtered on the per-list \`Lead Score\`. \`tag =
-<client>\` + \`dial attempts = 0\` already isolates exactly "this client's never-dialed
-leads" — a list that has been worked has ≥1 dial and drops out by itself. So a
-**standing** saved search built **once per client** absorbs every later upload with
-no UI work. The response's \`savedSearch\` block gives both the standing recipe and
-the legacy per-list one.
+- **Dial folder**: the list is filed into a PhoneBurner **folder** (created if absent),
+  named by the org's own per-list convention
+  \`"<PascalClient>: <Campaign> - <Nth> Attempt"\` — override with \`folder\`.
+
+**No manual step in the normal case.** A Contact Folder is a first-class dial source
+(PhoneBurner's flow is Contacts → a folder **or** a saved search → tick → Begin Dial
+Session), so once the list is filed into one the SDR just picks it and dials. The
+response's \`savedSearch.needed\` is \`false\` when nothing is left to build, with a
+plain-English \`reason\` you can show verbatim.
+
+⚠️ **A contact has exactly ONE \`category_id\`.** Filing an *overlapping* contact would
+move it out of the folder it currently sits in — possibly one the SDR is mid-way
+through dialing. So \`folder_assign\` defaults to \`net_new\`; overlaps stay put and
+\`folder.left_in_place\` reports how many, which flips \`savedSearch.needed\` to \`true\`
+(dial the folder for the new leads, or re-run with \`folder_assign:"all"\`).
+
+PhoneBurner exposes no saved-search endpoint, so \`savedSearch\` remains a *recipe* for
+the cases that still want one: a **standing** search (\`tag = <client>\` +
+\`dial attempts = 0\`, built once per client, absorbs every later upload) and the legacy
+**per-list** one.
 
 SDR→client mapping is the same one the purge uses (\`phoneburner_members\`); tokens
 resolve from GTMOS (\`SDR_LAUNCH_INTERNAL_URL\`/\`_SECRET\`).
@@ -681,6 +693,8 @@ resolve from GTMOS (\`SDR_LAUNCH_INTERNAL_URL\`/\`_SECRET\`).
 | \`attempt\` | String\\|Number | No | Which dial pass (\`first attempt\`, \`2nd\`, \`3\`; default 1). **Not a tag** — sets the \`savedSearch\` name suffix and its \`dial attempts = N-1\` criterion. |
 | \`tags\` | String[] | No | Extra tags. |
 | \`fresh_leads_tag\` | Boolean | No | Default \`true\`. Set \`false\` only when re-tagging leads already in the book. |
+| \`folder\` | String | No | Override the dial folder's name. Default = \`"<PascalClient>: <Campaign> - <Nth> Attempt"\`. |
+| \`folder_assign\` | String | No | \`net_new\` (default — overlaps stay in their current folder), \`all\` (move overlaps in too), or \`none\` (don't touch folders). |
 | \`dnc_scrub\` | Boolean | No | Default \`true\`. \`false\` uploads everything unchecked. |
 | \`on_duplicate\` | String | No | \`update\` (default — existing contacts gain the new tag) or \`skip\`. |
 | \`dry_run\` | Boolean | No | Validate + DNC-scrub + preview (peeks the next Lead Score, mints/creates nothing). |
@@ -695,8 +709,18 @@ resolve from GTMOS (\`SDR_LAUNCH_INTERNAL_URL\`/\`_SECRET\`).
   "clientTag": "Club Hub",
   "leadScore": { "value": "CLUB8", "prefix": "CLUB", "seq": 8, "issued": true },
   "tags": ["fresh leads", "Club Hub", "ISTE 2026 TAM"],
+  "folder": {
+    "id": "9142",
+    "name": "ClubHub: ISTE 2026 TAM - 1st Attempt",
+    "created": true,
+    "would_create": false,
+    "assigned": 240,
+    "left_in_place": 47
+  },
   "savedSearch": {
     "api_available": false,
+    "needed": true,
+    "reason": "Folder \\"ClubHub: ISTE 2026 TAM - 1st Attempt\\" holds the 240 net-new contacts, but 47 overlapping contact(s) stayed in their existing folder. Dial the folder for the new leads, or build the search / re-run with folderAssign:\\"all\\" to pull the overlaps in too.",
     "standing": {
       "name": "ClubHub: 1st Attempt",
       "criteria": ["tag = Club Hub", "dial attempts = 0"],
@@ -717,8 +741,10 @@ resolve from GTMOS (\`SDR_LAUNCH_INTERNAL_URL\`/\`_SECRET\`).
 \`net_new\`/\`overlap\` are \`null\` when the seat's book couldn't be read (then Lead
 Score is stamped on all). \`dnc.entries_present:false\` means the client has no DNC
 data to scrub against — "clean" ≠ "unchecked". Detail arrays cap at 100; \`totals\` are exact.
-\`savedSearch.standing\` only needs building the first time for a given client +
-attempt pass; after that this endpoint is the whole job.
+In a **dry run** \`folder.id\` is \`null\` with \`would_create:true\` when the folder doesn't
+exist yet, and \`assigned\`/\`left_in_place\` are projections — the run performs the folder
+*lookup* but no writes. **Check \`savedSearch.needed\` before telling anyone to open
+PhoneBurner**: when it is \`false\`, this endpoint was the whole job.
 
 **Errors**: \`400\` (missing \`client_id\`/\`contacts\`, GTMOS config absent, no active
 SDR, unknown \`sdr\`, or the chosen SDR has no PhoneBurner token), \`404\` (unknown

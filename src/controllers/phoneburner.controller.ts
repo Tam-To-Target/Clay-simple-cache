@@ -72,6 +72,7 @@ export const phoneburnerController = {
    *   sdr?,                            // slug | name | email | pb_member_id
    *                                    //   (required only when >1 SDR is assigned)
    *   campaign?, lead_score?, attempt?, tags?, fresh_leads_tag? = true,  // labeling
+   *   folder?, folder_assign? = "net_new",   // dial folder ("all" | "none" to change)
    *   dnc_scrub? = true, on_duplicate? = "update", dry_run? = false,
    *   contacts: (string | { phone, first_name?, last_name?, name?, company?, email?, title?, notes? })[]
    * }
@@ -79,8 +80,13 @@ export const phoneburnerController = {
    * real convention: tags `fresh leads` + client tag + bare campaign name, a
    * "Lead Score" custom field (auto-minted for the client unless `lead_score` is
    * given, stamped on net-new contacts only), scrubbing the client's DNC first by
-   * default. `attempt` is NOT a tag — it drives the `savedSearch` block in the
-   * response, which tells the SDR what to build once in the UI.
+   * default. `attempt` is NOT a tag — it names the dial folder and drives the
+   * `savedSearch` block.
+   *
+   * The list is also filed into a PhoneBurner FOLDER (created if absent), which is a
+   * dialable target — so normally the SDR has nothing to build in the UI and
+   * `savedSearch.needed` comes back false. Overlapping contacts stay in their current
+   * folder by default (a contact has only one); `folder_assign:"all"` moves them.
    *
    * When more than one SDR is assigned and `sdr` is missing/ambiguous, responds
    * 409 with { needs_sdr:true, sdrs:[…] } so the caller can pick.
@@ -96,6 +102,8 @@ export const phoneburnerController = {
         attempt,
         tags,
         fresh_leads_tag,
+        folder,
+        folder_assign,
         dnc_scrub,
         on_duplicate,
         dry_run,
@@ -140,6 +148,11 @@ export const phoneburnerController = {
         attempt,
         tags: Array.isArray(tags) ? tags : undefined,
         freshLeadsTag: typeof fresh_leads_tag === "boolean" ? fresh_leads_tag : undefined,
+        folder: typeof folder === "string" ? folder : undefined,
+        folderAssign:
+          folder_assign === "all" || folder_assign === "none" || folder_assign === "net_new"
+            ? folder_assign
+            : undefined,
         dncScrub: typeof dnc_scrub === "boolean" ? dnc_scrub : undefined,
         onDuplicate: on_duplicate === "skip" ? "skip" : on_duplicate === "update" ? "update" : undefined,
         dryRun: dry_run === true,

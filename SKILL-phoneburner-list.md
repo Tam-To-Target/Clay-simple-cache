@@ -16,7 +16,7 @@ result.
 
 | Loom step | Automated? |
 |---|---|
-| 0:00–1:28 Build the saved-search folder: tag = client, dial attempts = 0, `Lead Score = club8`; name it `<Client>: <Campaign> - 1st Attempt` | ❌ no API — but see Step 4, it becomes **once per client**, not once per list |
+| 0:00–1:28 Build the saved-search folder: tag = client, dial attempts = 0, `Lead Score = club8`; name it `<Client>: <Campaign> - 1st Attempt` | ✅ **replaced** — we create a real dial *folder* with that same name and file the list into it (Step 4). No saved search needed. |
 | 1:28–2:05 Pull the list into Clay, filter phone-not-empty | ✅ rows without a phone come back in `invalid[]` |
 | 2:05–2:57 Clay formula stamping `club8` on every row | ✅ Lead Score auto-minted |
 | 2:57–4:17 CSV upload + column mapping (full name → first/last, title → Job Title, school → company, phone → Home) | ✅ |
@@ -28,14 +28,13 @@ Attempt"` is the *name of the saved search*; the attempt is a *dial-count criter
 inside* it. An earlier version of this skill put both in `tags[]`, so uploads did not
 match the tag filters the SDRs' existing saved searches use. Fixed 2026-07-30.
 
-ℹ️ **On automating the folder via `/folders`** — an earlier version of this file said
-not to, claiming a folder is "a static category that does not drive the dial queue."
-**That was wrong** (corrected 2026-07-31, see `PB-list-manager/FINDINGS.md`). A Contact
-Folder *is* a first-class dial source — PhoneBurner's flow is Contacts → a folder **or**
-a saved search → tick → Begin Dial Session. A folder simply isn't a *dynamic* filter.
-`POST/PUT/DELETE /rest/1/folders` exist and `POST /contacts` accepts `category_id`, so a
-folder-per-list would remove the manual step below entirely, with fewer SDR clicks than
-building a search. Not built yet — until it is, follow Step 4.
+✅ **This is now end-to-end.** A Contact Folder *is* a first-class dial source —
+PhoneBurner's flow is Contacts → a folder **or** a saved search → tick → Begin Dial
+Session. A folder simply isn't a *dynamic* filter, which is the only reason the team
+reached for a saved search. So the upload creates a folder per list and files the
+contacts into it via `category_id`; the SDR picks it and dials. (An earlier version of
+this file wrongly claimed `/folders` makes "a static category that does not drive the
+dial queue" — corrected 2026-07-31, see `PB-list-manager/FINDINGS.md`.)
 
 ## Service + auth (only these endpoints, all in this one service)
 
@@ -69,8 +68,10 @@ itself and reports every collision. Do not build a separate scrub step.
 - **Job Title.** A row's `title` → the account's `Job Title` custom field.
 - **DNC.** Scrubbed before upload by default; `dnc_scrub:false` disables.
 - **Owner.** Created under the SDR's own PhoneBurner token.
-- **Saved-search recipe.** The response's `savedSearch` block tells you exactly what
-  the SDR needs in the UI — see Step 4.
+- **Dial folder.** Creates (or reuses) a folder named
+  `"<PascalClient>: <Campaign> - <Nth> Attempt"` and files the contacts into it, so the
+  SDR has a dialable target with no UI work. `savedSearch.needed` says whether anything
+  is left to build — see Step 4.
 
 ## Step 0 — Resolve the client (BLOCKING)
 
@@ -141,6 +142,10 @@ jq -n --slurpfile c /tmp/contacts.json \
 - On `200`, read the preview back to the user and confirm:
   - `leadScore.value` (the next Lead Score that WILL be minted — e.g. `CLUB8`),
   - `tags`, `clientTag`, `sdr`,
+  - `folder`: the dial folder's `name`, and whether it already exists
+    (`would_create:false`) or will be created (`would_create:true`). `assigned` /
+    `left_in_place` are projections in a dry run. **A dry run reads the folder list but
+    writes nothing** — no folder is created until you apply.
   - `dnc`: if `entries_present:false`, say plainly **"DNC not applied — the client
     has no DNC data to scrub against"** (don't present it as clean); report
     `skipped` + the `dnc_skipped[]` collisions,
@@ -161,45 +166,46 @@ jq -n --slurpfile c /tmp/contacts.json \
        -X POST "$BASE/admin/phoneburner/upload" -d @-
 ```
 
-Report `totals.uploaded` / `failed` / `net_new` / `overlap` and the recorded
-`leadScore.value` (`issued:true`). Investigate any `failed[]` (status + error).
-Then resolve `savedSearch` per Step 4 — usually "nothing to do".
+Report `totals.uploaded` / `failed` / `net_new` / `overlap`, the recorded
+`leadScore.value` (`issued:true`), and `folder.name` + `folder.assigned`. Investigate
+any `failed[]` (status + error). Then do Step 4 — usually "nothing to do".
 
-## Step 4 — The saved search (one-time per client, then never again)
+## Step 4 — Report the dial target (usually: nothing to do)
 
-PhoneBurner has no saved-search/smart-folder API, so this stays in the UI. **But it
-does not have to be redone per list.** Read `savedSearch` from the response and act
-on it:
+The upload files the list into a PhoneBurner **folder**, which is a dialable target.
+**Read `savedSearch.needed` and let it decide what you tell the user.**
 
 ```json
-"savedSearch": {
-  "api_available": false,
-  "standing":  { "name": "ClubHub: 1st Attempt",
-                 "criteria": ["tag = Club Hub", "dial attempts = 0"], "build_once": true },
-  "per_list":  { "name": "ClubHub: ISTE 2026 TAM - 1st Attempt",
-                 "criteria": ["tag = Club Hub", "Lead Score = CLUB8", "dial attempts = 0"] }
-}
+"folder": { "id": "9142", "name": "ClubHub: ISTE 2026 TAM - 1st Attempt",
+            "created": true, "would_create": false,
+            "assigned": 240, "left_in_place": 47 },
+"savedSearch": { "api_available": false, "needed": true, "reason": "…",
+                 "standing": { "name": "ClubHub: 1st Attempt",
+                               "criteria": ["tag = Club Hub", "dial attempts = 0"],
+                               "build_once": true },
+                 "per_list": { "name": "ClubHub: ISTE 2026 TAM - 1st Attempt",
+                               "criteria": ["tag = Club Hub", "Lead Score = CLUB8",
+                                            "dial attempts = 0"] } }
 ```
 
-**Prefer `standing`.** The only criterion that changed per list was the per-list
-`Lead Score`. Drop it and `tag = <client>` + `dial attempts = 0` already describes
-exactly "this client's never-dialed leads" — a list that's been worked has ≥1 dial
-and falls out on its own. So:
+- **`needed: false`** (the normal case) → say plainly: *"Nothing to build. The leads are
+  in folder `<folder.name>` — open Contacts, pick that folder, Begin Dial Session."*
+  **Do not** hand them saved-search instructions they don't need.
+- **`needed: true`** → show `savedSearch.reason` verbatim; it already explains why.
+  The usual cause is `folder.left_in_place > 0`: overlapping contacts stayed in their
+  existing folder because **a contact can only be in one**, and moving it could yank it
+  out of a list the SDR is mid-way through. Offer the choice — dial the folder for the
+  new leads, or re-run with `folder_assign:"all"` to pull the overlaps in.
 
-- **First upload for a client** → tell the user to build `standing` once (name +
-  criteria verbatim). Say plainly that it is a one-time setup.
-- **Every upload after that** → nothing to do in the UI. Say so explicitly:
-  *"no folder work needed — the leads are already in `<standing.name>`."*
-- **`per_list` is the exception**, not the default. Offer it only when they need to
-  dial ONE list while another un-dialed list for the same client is still pending.
+**`standing` / `per_list` are fallback recipes**, for a client who wants a search
+anyway. `standing` (build once per client, absorbs every later upload) beats `per_list`
+because the only criterion that changed per list was the Lead Score — and
+`tag = <client>` + `dial attempts = 0` already means "never-dialed leads for this
+client". Lead Score is still stamped either way, so attribution is unaffected.
 
-Lead Score is still stamped on every net-new contact, so per-list attribution and
-reporting are unaffected by filtering on the tag instead.
-
-> Confirm once with whoever owns the account that the dial-count criterion is named
-> as expected in the search builder (the Loom shows "always start with zero … for
-> the second attempt put one", which is a dial count, but the exact field label
-> wasn't on screen). Everything else in the recipe is verbatim from the Loom.
+> If a client does build a search, confirm the dial-count criterion's exact field label
+> once — the Loom shows *"always start with zero … for the second attempt put one"*,
+> clearly a dial count, but the builder wasn't on screen. Not needed for the folder path.
 
 ## Options reference (request body)
 
@@ -213,6 +219,8 @@ reporting are unaffected by filtering on the tag instead.
 | `attempt` | Dial pass (`first attempt` / `2nd` / `3`; default 1). **Not a tag** — drives `savedSearch`. |
 | `tags` | Extra tags, appended to the standard three. |
 | `fresh_leads_tag` | Default `true`. `false` only when re-tagging leads already in the book. |
+| `folder` | Override the dial folder's name. Default = `"<PascalClient>: <Campaign> - <Nth> Attempt"`. |
+| `folder_assign` | `net_new` (default), `all` (move overlaps into the folder too), `none` (don't touch folders). |
 | `dnc_scrub` | Default `true`. |
 | `on_duplicate` | `update` (default — existing gains the new tag) or `skip`. |
 | `dry_run` | `true` = preview + mint/write nothing. |
@@ -220,8 +228,13 @@ reporting are unaffected by filtering on the tag instead.
 ## Gotchas
 
 - **Overlap is expected.** PhoneBurner merges duplicates on email/phone; the new
-  campaign tag is added but the prior Lead Score is preserved (the service only
-  stamps Lead Score on net-new). Overlap counts come back in `totals.overlap`.
+  campaign tag is added but the prior Lead Score **and folder** are preserved (the
+  service only stamps those on net-new). Counts come back in `totals.overlap` and
+  `folder.left_in_place`.
+- **A contact lives in exactly ONE folder.** That's why overlaps aren't refiled by
+  default — `category_id` is singular, so moving a contact removes it from wherever it
+  is now, which may be a list someone is actively dialing. `folder_assign:"all"` is the
+  deliberate override; don't reach for it reflexively.
 - **SDR must have a PhoneBurner token in GTMOS**, or you get `400` ("no
   PhoneBurner token for SDR …"). That SDR hasn't connected PhoneBurner.
 - **Shared phone numbers collapse people** — two names on one switchboard line
