@@ -265,6 +265,76 @@ describe("uploadContacts", () => {
     expect(result.savedSearch.reason).toContain("Nothing to build");
   });
 
+  it("pages the folder list — a match on page 2 must not create a duplicate", async () => {
+    // 100 decoys fill page 1; the real folder is on page 2. Asking for page_size=300
+    // and reading one response (the original bug) would have missed it and created a
+    // second folder with the same name, splitting the client's leads in two.
+    const page1 = Array.from({ length: 100 }, (_, i) => ({ folder_id: `${i}`, folder_name: `Other ${i}` }));
+    const page2 = [{ folder_id: "777", folder_name: "ClubHub: ISTE 2026 TAM - 1st Attempt" }];
+    const fetchMock = vi.fn(async (url: string, init: any) => {
+      if (url.includes("/folders") && (init?.method ?? "GET") === "GET") {
+        const page = Number(new URL(url).searchParams.get("page") ?? 1);
+        expect(Number(new URL(url).searchParams.get("page_size"))).toBeLessThanOrEqual(100);
+        return makeRes(200, { folders: { page, total_pages: 2, folders: page === 1 ? page1 : page2 } });
+      }
+      if (url.includes("/folders")) throw new Error("must not create a duplicate folder");
+      if (url.includes("/contacts") && init?.method === "POST") return makeRes(200, { contact_user_id: "c1" });
+      throw new Error(`unexpected fetch: ${init?.method} ${url}`);
+    });
+    (global as any).fetch = fetchMock;
+
+    const result = await uploadContacts(client(), sdr(), [{ phone: "+12128675309" }], { campaign: "ISTE 2026 TAM" });
+
+    expect(result.folder).toMatchObject({ id: "777", created: false });
+    expect(folderCalls(fetchMock, "GET")).toHaveLength(2); // walked to page 2
+    expect(folderCalls(fetchMock, "POST")).toHaveLength(0);
+  });
+
+  it("stops paging folders when the listing has no more pages", async () => {
+    const fetchMock = contactFetch(); // single short page, no total_pages
+    (global as any).fetch = fetchMock;
+
+    await uploadContacts(client(), sdr(), [{ phone: "+12128675309" }], { campaign: "ISTE 2026 TAM" });
+
+    expect(folderCalls(fetchMock, "GET")).toHaveLength(1); // didn't walk 100 pages
+    expect(folderCalls(fetchMock, "POST")).toHaveLength(1); // absent → created
+  });
+
+  it("treats an unreadable folder listing as 'unknown' and refuses to create blindly", async () => {
+    // A 403 on the listing must NOT cause a create — that would duplicate a folder
+    // that already exists. Note the create here would SUCCEED if we attempted it, so
+    // this test fails if the code creates blindly (it isn't passing by accident).
+    const fetchMock = vi.fn(async (url: string, init: any) => {
+      if (url.includes("/folders") && (init?.method ?? "GET") === "GET") return makeRes(403, "nope");
+      if (url.includes("/folders")) return makeRes(200, { folder: { folder_id: "999", folder_name: "x" } });
+      if (url.includes("/contacts") && init?.method === "POST") return makeRes(200, { contact_user_id: "c1" });
+      throw new Error(`unexpected fetch: ${init?.method} ${url}`);
+    });
+    (global as any).fetch = fetchMock;
+
+    await expect(
+      uploadContacts(client(), sdr(), [{ phone: "+12128675309" }], { campaign: "ISTE 2026 TAM" })
+    ).rejects.toMatchObject({ status: 502, message: expect.stringContaining("risks a duplicate") });
+
+    expect(folderCalls(fetchMock, "POST")).toHaveLength(0); // never created
+    expect(bodiesOf(fetchMock)).toHaveLength(0); // and no contacts uploaded unfiled
+  });
+
+  it("a dry run reports 'couldn't check' instead of guessing when the listing fails", async () => {
+    (global as any).fetch = vi.fn(async (url: string, init: any) => {
+      if (url.includes("/folders") && (init?.method ?? "GET") === "GET") return makeRes(403, "nope");
+      throw new Error(`unexpected fetch: ${init?.method} ${url}`);
+    });
+
+    const result = await uploadContacts(client(), sdr(), [{ phone: "+12128675309" }], {
+      campaign: "ISTE 2026 TAM",
+      dryRun: true,
+    });
+
+    // Neither "exists" nor "will be created" — both would be a guess.
+    expect(result.folder).toMatchObject({ id: null, would_create: false });
+  });
+
   it("reuses an existing folder instead of creating a duplicate (case-insensitive)", async () => {
     const fetchMock = contactFetch(undefined, {
       folders: [{ folder_id: "77", folder_name: "clubhub: iste 2026 tam - 1st attempt" }],

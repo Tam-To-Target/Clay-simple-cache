@@ -430,19 +430,77 @@ const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().t
 /** Look a folder up by name (case-insensitive). Read-only — safe in a dry run.
  *  Returns null if the listing failed, so callers can't mistake "couldn't check"
  *  for "absent". */
+/** PhoneBurner documents `page_size` as 1–100. An earlier version asked for 300 and
+ *  read only the first response, which would silently MISS an existing folder in an
+ *  account with more than a page of them — and then create a duplicate. */
+const FOLDER_PAGE_SIZE = 100;
+/** Runaway guard: 100 pages × 100 = 10k folders, far beyond any real account. */
+const FOLDER_MAX_PAGES = 100;
+
+/** Read `total_pages` out of whatever envelope PB wrapped the collection in. */
+function totalPagesOf(env: any): number | null {
+  for (const node of [env, env?.folders, env?.data]) {
+    const n = Number(node?.total_pages);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+/**
+ * Three-state result. "absent" and "unknown" MUST stay distinguishable: creating a
+ * folder because we merely failed to read the list would duplicate one that already
+ * exists, splitting a client's leads across two identically-named folders — and the
+ * SDR would dial whichever they happened to open.
+ */
+export type FolderLookup =
+  | { status: "found"; folder: PbFolder }
+  | { status: "absent" }
+  | { status: "unknown"; detail: string };
+
+/**
+ * Look a folder up by name (case-insensitive), paging until found or exhausted.
+ * Read-only — safe in a dry run.
+ *
+ * ⚠️ Must page. PhoneBurner documents `page_size` as 1–100, so a single request
+ * cannot be assumed to hold every folder.
+ */
 export async function findFolderByName(
   getToken: TokenGetter,
   name: string,
   throttle: () => Promise<void>
-): Promise<PbFolder | null> {
-  const res = await pbUploadFetch(`/folders?page_size=300`, getToken, { method: "GET" }, throttle);
-  if (!res.ok) return null;
-  const json: any = await res.json().catch(() => ({}));
-  const env = json?.folders ?? json;
-  const folders = flattenPbCollection(env?.folders ?? env?.data ?? env, isFolderLeaf)
-    .map(folderOf)
-    .filter((f): f is PbFolder => !!f);
-  return folders.find((f) => sameName(f.name, name)) ?? null;
+): Promise<FolderLookup> {
+  let page = 1;
+  let lastPage: number | null = null;
+
+  while (page <= (lastPage ?? FOLDER_MAX_PAGES) && page <= FOLDER_MAX_PAGES) {
+    const res = await pbUploadFetch(
+      `/folders?page=${page}&page_size=${FOLDER_PAGE_SIZE}`,
+      getToken,
+      { method: "GET" },
+      throttle
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return { status: "unknown", detail: `HTTP ${res.status} ${body.slice(0, 200)}` };
+    }
+
+    const json: any = await res.json().catch(() => ({}));
+    const env = json?.folders ?? json;
+    const folders = flattenPbCollection(env?.folders ?? env?.data ?? env, isFolderLeaf)
+      .map(folderOf)
+      .filter((f): f is PbFolder => !!f);
+
+    const hit = folders.find((f) => sameName(f.name, name));
+    if (hit) return { status: "found", folder: hit };
+
+    lastPage ??= totalPagesOf(env);
+    // No pagination metadata and a short page → that was everything.
+    if (lastPage === null && folders.length < FOLDER_PAGE_SIZE) return { status: "absent" };
+    if (folders.length === 0) return { status: "absent" };
+    page++;
+  }
+  // Walked every page we were told about without a hit.
+  return lastPage !== null ? { status: "absent" } : { status: "unknown", detail: `exceeded ${FOLDER_MAX_PAGES} pages` };
 }
 
 /**
@@ -455,8 +513,16 @@ export async function resolveOrCreateFolder(
   name: string,
   throttle: () => Promise<void>
 ): Promise<{ id: string; name: string; created: boolean }> {
-  const existing = await findFolderByName(getToken, name, throttle);
-  if (existing) return { ...existing, created: false };
+  const lookup = await findFolderByName(getToken, name, throttle);
+  if (lookup.status === "found") return { ...lookup.folder, created: false };
+  // Never create on "unknown" — that's how you end up with two folders of the
+  // same name and a client's leads split between them.
+  if (lookup.status === "unknown") {
+    throw new UploadInputError(
+      `Could not read PhoneBurner's folder list, so "${name}" was not created (creating blindly risks a duplicate): ${lookup.detail}`,
+      502
+    );
+  }
 
   const res = await pbUploadFetch(
     `/folders`,
@@ -479,7 +545,7 @@ export async function resolveOrCreateFolder(
   // Created but the id wasn't in the response body — re-read rather than fail, so a
   // shape change in PB's create response can't strand the upload.
   const reread = await findFolderByName(getToken, name, throttle);
-  if (reread) return { ...reread, created: true };
+  if (reread.status === "found") return { ...reread.folder, created: true };
   throw new UploadInputError(`PhoneBurner created folder "${name}" but returned no id`, 502);
 }
 
@@ -737,12 +803,14 @@ export async function uploadContacts(
       // Can't reach PhoneBurner at all — report the intent, don't guess existence.
       folder = { id: null, name: folderName, created: false, would_create: false, assigned: 0, left_in_place: plannedLeft };
     } else if (dryRun) {
-      const existing = await findFolderByName(getToken, folderName, throttle);
+      const lookup = await findFolderByName(getToken, folderName, throttle);
+      // On "unknown" a dry run still reports rather than throwing — it writes
+      // nothing, so the honest answer is "couldn't check", not a guess either way.
       folder = {
-        id: existing?.id ?? null,
-        name: existing?.name ?? folderName,
+        id: lookup.status === "found" ? lookup.folder.id : null,
+        name: lookup.status === "found" ? lookup.folder.name : folderName,
         created: false,
-        would_create: !existing,
+        would_create: lookup.status === "absent",
         assigned: plannedAssigned,
         left_in_place: plannedLeft,
       };
