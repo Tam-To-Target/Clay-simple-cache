@@ -201,6 +201,23 @@ describe("pickCompanies", () => {
   it("returns nothing when there is nothing", () => {
     expect(pickCompanies([], { config: cfg, strategy: "buyer_id" }).chosen).toEqual([]);
   });
+
+  it("tags every refusal with a machine-readable reason", () => {
+    // Callers must be able to tell "the account is missing from the CRM" from
+    // "our matcher rejected a bad candidate" without parsing prose.
+    const wrongState = pickCompanies([c("1", { state: "MS" })], {
+      buyerState: "North Carolina", buyerId: null, config: cfg, strategy: "name",
+    });
+    expect(wrongState.reason).toBe("state_mismatch");
+
+    const ambiguous = pickCompanies([c("1"), c("2")], {
+      buyerState: null, buyerId: null, config: { ...cfg, on_multiple: "skip" }, strategy: "buyer_id",
+    });
+    expect(ambiguous.reason).toBe("ambiguous_match");
+
+    // A successful pick carries no reason — reason means "why not / why odd".
+    expect(pickCompanies([c("1")], { config: cfg, strategy: "buyer_id" }).reason).toBeUndefined();
+  });
 });
 
 describe("resolveAssociationConfig", () => {

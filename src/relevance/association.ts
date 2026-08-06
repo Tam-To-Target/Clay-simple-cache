@@ -194,11 +194,33 @@ export interface CompanyCandidate {
   properties: Record<string, any>;
 }
 
+/**
+ * Machine-readable cause when a signal ends up without a company. The `warning`
+ * text is for a human reading one response; THIS is what a caller branches on to
+ * decide "the account is missing from the CRM" vs "our matching refused a bad
+ * candidate" — two situations that need completely different follow-up.
+ */
+export type AssociationReason =
+  /** The signal carries no buyerId, no domain and no buyer name to match on. */
+  | "no_match_key"
+  /** Every rung was searched and no company matched. The account is not in the CRM. */
+  | "no_company_found"
+  /** A name matched, but in the wrong state — refused as a wrong match. */
+  | "state_mismatch"
+  /** Several companies matched and on_multiple="skip". */
+  | "ambiguous_match"
+  /** No company existed, so one was created (create_missing_company: true). */
+  | "company_created"
+  /** The association call itself errored. */
+  | "hubspot_error";
+
 export interface PickResult {
   /** Companies to associate. Empty when nothing could be resolved safely. */
   chosen: string[];
   /** Non-fatal explanation of a collision or a refusal, surfaced in the response. */
   warning?: string;
+  /** Set when `chosen` is empty — why. */
+  reason?: AssociationReason;
 }
 
 /**
@@ -256,6 +278,7 @@ export function pickCompanies(
           `Name matched ${candidates.length} company/companies — ${seen} — but none is in ` +
           `${wantStateEarly}. District names repeat across states, so this was treated as a wrong ` +
           `match rather than associated.`,
+        reason: "state_mismatch",
       };
     }
     candidates = kept;
@@ -270,6 +293,7 @@ export function pickCompanies(
       warning:
         `${candidates.length} companies matched by ${strategy} (${ids}) and on_multiple="skip" — ` +
         `not associated. Dedupe them, or set on_multiple to "primary".`,
+      reason: "ambiguous_match",
     };
   }
   if (config.on_multiple === "all") {

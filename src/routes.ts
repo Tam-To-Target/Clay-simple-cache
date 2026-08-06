@@ -89,6 +89,11 @@ router.get('/relevance-config/:client_id', authMiddleware, relevanceController.g
 // token, so the credential that writes the verdict also creates its fields.
 // GET = dry run (plan + what already exists), POST = create (idempotent).
 router.get('/relevance-provision/:client_id', authMiddleware, relevanceController.provision);
+// Backfill: attach companies to Signal records pushed before association shipped.
+// GET = dry run. No Starbridge fetch and no model call — the buyer spine is read
+// off the HubSpot record itself.
+router.get('/relevance-associate/:client_id', authMiddleware, relevanceController.associate);
+router.post('/relevance-associate/:client_id', authMiddleware, relevanceController.associate);
 router.post('/relevance-provision/:client_id', authMiddleware, relevanceController.provision);
 
 router.get('/docs/api', docsController.get);

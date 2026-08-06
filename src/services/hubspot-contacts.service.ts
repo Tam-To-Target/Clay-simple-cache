@@ -377,6 +377,41 @@ export async function getObjectProperties(
   return json.properties || {};
 }
 
+/**
+ * One page of records of `objectType`. Returns the page plus the paging cursor,
+ * so a caller can walk an entire object type without holding it all in memory.
+ */
+export async function listObjectsPage(
+  portalId: string,
+  objectType: string,
+  properties: string[],
+  after?: string,
+  tokenOverride?: string,
+  limit = 100
+): Promise<{ results: Array<{ id: string; properties: Record<string, any> }>; after?: string }> {
+  const q = new URLSearchParams({ limit: String(limit) });
+  if (properties.length) q.set("properties", properties.join(","));
+  if (after) q.set("after", after);
+  const res = await hsFetch(
+    portalId,
+    `/crm/v3/objects/${encodeURIComponent(objectType)}?${q.toString()}`,
+    { method: "GET" },
+    tokenOverride
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new HubspotApiError(`List ${objectType} failed: HTTP ${res.status} ${body}`, res.status);
+  }
+  const json = (await res.json()) as {
+    results?: Array<{ id: string; properties?: Record<string, any> }>;
+    paging?: { next?: { after?: string } };
+  };
+  return {
+    results: (json.results || []).map((r) => ({ id: r.id, properties: r.properties || {} })),
+    after: json.paging?.next?.after,
+  };
+}
+
 /** Create an object of `objectType` with `properties`; returns the new id. */
 export async function createObject(
   portalId: string,

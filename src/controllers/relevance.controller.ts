@@ -19,6 +19,7 @@ import {
   searchObjectIdsByProperty,
   searchObjectsByProperty,
   countObjectsWithProperty,
+  listObjectsPage,
   listAssociatedIds,
   associateObjects,
   createObject,
@@ -31,6 +32,8 @@ import {
   resolveAssociationConfig,
   pickCompanies,
   extractDomain,
+  normalizeState,
+  type AssociationReason,
   type AssociationConfig,
   type AssociationStrategy,
   type CompanyCandidate,
@@ -407,6 +410,128 @@ export const relevanceController = {
     }
   },
 
+  /**
+   * GET|POST /relevance-associate/:client_id
+   *
+   * Backfill: attach a company to Signal records that already exist in HubSpot
+   * but have none. Every signal pushed before association shipped is orphaned,
+   * and re-scoring them would re-bill the model for a verdict that has not
+   * changed — so this reads the buyer spine off the RECORD and runs the same
+   * ladder, with no Starbridge fetch and no model call.
+   *
+   * GET is a dry run. `?limit=N` caps how many records are examined.
+   */
+  async associate(req: Request, res: Response): Promise<void> {
+    try {
+      const clientId = req.params.client_id;
+      const dryRun = req.method === "GET";
+      const limitRaw = Number(req.query.limit);
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : Infinity;
+
+      const stored = await relevanceConfigService.get(clientId);
+      if (!stored) {
+        res.status(404).json({ error: `No relevance config for client_id: ${clientId}` });
+        return;
+      }
+      const resolved = await resolvePushTarget(stored.document, {}, clientId);
+      if (!resolved.ok) {
+        res.status(422).json({ error: resolved.error });
+        return;
+      }
+      const target = resolved.target;
+      if (!target.association.enabled) {
+        res.status(422).json({
+          error: "hubspot_push.association.enabled is false for this client — nothing to backfill.",
+        });
+        return;
+      }
+
+      // Spine properties the ladder reads off the record.
+      const wanted = ["signal_id", "buyer_id", "buyer_name", "buyer_state", "contact_email", "name"]
+        .map((c) => target.fieldMap[c])
+        .filter(Boolean) as string[];
+
+      let examined = 0;
+      let alreadyAssociated = 0;
+      let associated = 0;
+      const byReason: Record<string, number> = {};
+      const unmatched: Array<{ id: string; buyer: string | null; reason?: string }> = [];
+      const failures: Array<{ id: string; error: string }> = [];
+      let after: string | undefined;
+
+      outer: do {
+        const page = await listObjectsPage(
+          target.portalId,
+          target.objectType,
+          wanted,
+          after,
+          target.privateAppToken
+        );
+        after = page.after;
+
+        for (const rec of page.results) {
+          if (examined >= limit) break outer;
+          examined++;
+
+          const existing = await listAssociatedIds(
+            target.portalId,
+            target.objectType,
+            rec.id,
+            target.association.object_type,
+            target.privateAppToken
+          );
+          if (existing.length) {
+            alreadyAssociated++;
+            continue;
+          }
+
+          const subject = recordSubject(rec.properties, target.fieldMap);
+          const buyerLabel = subject.buyerName ?? subject.buyerId;
+
+          if (dryRun) {
+            // Resolve without writing, so the dry run reports the real outcome
+            // rather than an optimistic guess.
+            const preview = await previewAssociation(target, subject);
+            if (preview.chosen.length) associated++;
+            else {
+              const r = preview.reason ?? "no_company_found";
+              byReason[r] = (byReason[r] || 0) + 1;
+              if (unmatched.length < 50) unmatched.push({ id: rec.id, buyer: buyerLabel, reason: r });
+            }
+            continue;
+          }
+
+          const outcome = await associateCompany(target, subject, rec.id);
+          if (outcome.status === "associated" || outcome.status === "already") {
+            associated++;
+            if (outcome.reason) byReason[outcome.reason] = (byReason[outcome.reason] || 0) + 1;
+          } else if (outcome.status === "failed") {
+            failures.push({ id: rec.id, error: outcome.error || "unknown" });
+          } else {
+            const r = outcome.reason ?? "no_company_found";
+            byReason[r] = (byReason[r] || 0) + 1;
+            if (unmatched.length < 50) unmatched.push({ id: rec.id, buyer: buyerLabel, reason: r });
+          }
+        }
+      } while (after);
+
+      res.json({
+        client_id: clientId,
+        object_type: target.objectType,
+        examined,
+        already_associated: alreadyAssociated,
+        associated,
+        still_unassociated: examined - alreadyAssociated - associated - failures.length,
+        by_reason: byReason,
+        unmatched_sample: unmatched,
+        failures,
+        ...(dryRun ? { dry_run: true } : {}),
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  },
+
   /** GET /relevance-config/:client_id — read/debug endpoint for the skill. */
   async getConfig(req: Request, res: Response): Promise<void> {
     try {
@@ -633,13 +758,61 @@ async function checkAssociationReadiness(
 export interface AssociationOutcome {
   /** associated = we linked it now; already = the link existed; none = nothing matched. */
   status: "associated" | "already" | "none" | "skipped" | "failed";
+  /**
+   * Machine-readable cause. Present whenever the signal did NOT end up on a
+   * company, and on `associated` when the company had to be created. Callers
+   * branch on this, not on the prose in `warning`: `no_company_found` means the
+   * account is missing from the CRM and someone should add it, while
+   * `state_mismatch` / `ambiguous_match` mean the CRM data needs fixing.
+   */
+  reason?: AssociationReason;
   company_ids?: string[];
   /** Which rung of the ladder matched. */
   strategy?: AssociationStrategy;
   /** The value that matched, so a bad match is debuggable without re-running. */
   matched_on?: string;
+  /** True when the company did not exist and was created for this signal. */
+  company_created?: boolean;
   warning?: string;
   error?: string;
+}
+
+/** Identity of a signal for association purposes — from a live payload or a HubSpot record. */
+interface AssociationSubject {
+  buyerId: string | null;
+  buyerName: string | null;
+  buyerState: string | null;
+  domain: string | null;
+}
+
+/** Association subject from a live Starbridge payload. */
+function signalSubject(signal: ParsedSignal, contactEmail: string | null): AssociationSubject {
+  return {
+    buyerId: signal.buyerId,
+    buyerName: signal.buyerName,
+    buyerState: signal.buyerState,
+    domain: extractDomain(signal.columns, contactEmail),
+  };
+}
+
+/**
+ * Association subject from a Signal record ALREADY in HubSpot — the backfill
+ * path. The spine properties the push writes carry everything the ladder needs,
+ * so a previously-orphaned signal can be associated without re-fetching it from
+ * Starbridge and without spending a model call.
+ */
+function recordSubject(props: Record<string, any>, fieldMap: Record<string, string>): AssociationSubject {
+  const get = (canonical: string) => {
+    const prop = fieldMap[canonical];
+    const v = prop ? props[prop] : null;
+    return v === null || v === undefined || String(v).trim() === "" ? null : String(v).trim();
+  };
+  return {
+    buyerId: get("buyer_id"),
+    buyerName: get("buyer_name"),
+    buyerState: get("buyer_state"),
+    domain: extractDomain({}, get("contact_email")),
+  };
 }
 
 type PushOutcome =
@@ -665,30 +838,30 @@ type PushOutcome =
  */
 async function associateCompany(
   target: PushTarget,
-  signal: ParsedSignal,
-  signalObjectId: string,
-  contactEmail: string | null
+  subject: AssociationSubject,
+  signalObjectId: string
 ): Promise<AssociationOutcome> {
   const cfg = target.association;
   if (!cfg.enabled) return { status: "skipped" };
 
   const wanted = [cfg.buyer_id_property, cfg.domain_property, cfg.name_property, cfg.state_property];
-  const domain = extractDomain(signal.columns, contactEmail);
+  const { buyerId, buyerName, buyerState, domain } = subject;
 
   const attempts: Array<{ strategy: AssociationStrategy; property: string; value: string }> = [];
   for (const strategy of cfg.strategies) {
-    if (strategy === "buyer_id" && signal.buyerId) {
-      attempts.push({ strategy, property: cfg.buyer_id_property, value: signal.buyerId });
+    if (strategy === "buyer_id" && buyerId) {
+      attempts.push({ strategy, property: cfg.buyer_id_property, value: buyerId });
     } else if (strategy === "domain" && domain) {
       attempts.push({ strategy, property: cfg.domain_property, value: domain });
-    } else if (strategy === "name" && signal.buyerName) {
-      attempts.push({ strategy, property: cfg.name_property, value: signal.buyerName });
+    } else if (strategy === "name" && buyerName) {
+      attempts.push({ strategy, property: cfg.name_property, value: buyerName });
     }
   }
 
   if (!attempts.length) {
     return {
       status: "none",
+      reason: "no_match_key",
       warning:
         "No usable match key on this signal — it carries no buyerId, no domain and no buyer name, " +
         "so there is nothing to match a company on.",
@@ -716,42 +889,24 @@ async function associateCompany(
       if (!candidates.length) continue;
 
       const pick = pickCompanies(candidates, {
-        buyerState: signal.buyerState,
-        buyerId: signal.buyerId,
+        buyerState,
+        buyerId,
         config: cfg,
         strategy: attempt.strategy,
       });
       if (!pick.chosen.length) {
         return {
           status: "none",
+          reason: pick.reason,
           strategy: attempt.strategy,
           matched_on: attempt.value,
           warning: pick.warning,
         };
       }
 
-      const existing = await listAssociatedIds(
-        target.portalId,
-        target.objectType,
-        signalObjectId,
-        cfg.object_type,
-        target.privateAppToken
-      );
-      const existingSet = new Set(existing);
-      const toLink = pick.chosen.filter((id) => !existingSet.has(id));
-      for (const companyId of toLink) {
-        await associateObjects(
-          target.portalId,
-          target.objectType,
-          signalObjectId,
-          cfg.object_type,
-          companyId,
-          cfg.association_type_id,
-          target.privateAppToken
-        );
-      }
+      const linked = await linkCompanies(target, signalObjectId, pick.chosen);
       return {
-        status: toLink.length ? "associated" : "already",
+        status: linked ? "associated" : "already",
         company_ids: pick.chosen,
         strategy: attempt.strategy,
         matched_on: attempt.value,
@@ -759,18 +914,132 @@ async function associateCompany(
       };
     }
 
-    // Every rung came back empty. Creating a company here is possible but off by
-    // default: Starbridge emits district / school / program at one domain, so
-    // blanket creation measured 5 junk records out of 6.
+    // Every rung came back empty: the account is simply not in the CRM.
+    const tried = attempts.map((a) => `${a.strategy}="${a.value}"`).join(", ");
+    if (!cfg.create_missing_company) {
+      return {
+        status: "none",
+        reason: "no_company_found",
+        warning:
+          `No company matched (tried ${tried}). This buyer has no company record on this portal — ` +
+          `create one (or enable hubspot_push.association.create_missing_company) and re-push.`,
+      };
+    }
+
+    // Opt-in only. Off by default because Starbridge emits district / school /
+    // program at one domain, so blanket creation measured 5 junk records out of 6.
+    const props: Record<string, any> = {};
+    if (buyerName) props[cfg.name_property] = buyerName;
+    if (domain) props[cfg.domain_property] = domain;
+    const st = buyerState ? normalizeState(buyerState) : null;
+    if (st) props[cfg.state_property] = st;
+    if (buyerId) props[cfg.buyer_id_property] = buyerId;
+    if (!Object.keys(props).length) {
+      return {
+        status: "none",
+        reason: "no_match_key",
+        warning: `create_missing_company is on, but this signal has no name/domain/buyer id to create a company from.`,
+      };
+    }
+    const newId = await createObject(target.portalId, cfg.object_type, props, target.privateAppToken);
+    await linkCompanies(target, signalObjectId, [newId]);
     return {
-      status: "none",
+      status: "associated",
+      reason: "company_created",
+      company_ids: [newId],
+      company_created: true,
       warning:
-        `No company matched (tried ${attempts.map((a) => `${a.strategy}="${a.value}"`).join(", ")}). ` +
-        `The buyer likely has no company record on this portal yet.`,
+        `No company matched (tried ${tried}) — created company ${newId} for "${buyerName ?? domain ?? buyerId}". ` +
+        `Starbridge emits district/school/program at one domain, so verify this is not a duplicate.`,
     };
   } catch (e) {
-    return { status: "failed", error: e instanceof Error ? e.message : String(e) };
+    return {
+      status: "failed",
+      reason: "hubspot_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
+}
+
+/**
+ * Run the ladder WITHOUT writing anything — the dry-run half of the backfill.
+ * Shares `pickCompanies` with the real path so the preview cannot disagree with
+ * what a subsequent POST would actually do.
+ */
+async function previewAssociation(
+  target: PushTarget,
+  subject: AssociationSubject
+): Promise<{ chosen: string[]; reason?: AssociationReason }> {
+  const cfg = target.association;
+  const wanted = [cfg.buyer_id_property, cfg.domain_property, cfg.name_property, cfg.state_property];
+  const attempts: Array<{ strategy: AssociationStrategy; property: string; value: string }> = [];
+  for (const strategy of cfg.strategies) {
+    if (strategy === "buyer_id" && subject.buyerId) {
+      attempts.push({ strategy, property: cfg.buyer_id_property, value: subject.buyerId });
+    } else if (strategy === "domain" && subject.domain) {
+      attempts.push({ strategy, property: cfg.domain_property, value: subject.domain });
+    } else if (strategy === "name" && subject.buyerName) {
+      attempts.push({ strategy, property: cfg.name_property, value: subject.buyerName });
+    }
+  }
+  if (!attempts.length) return { chosen: [], reason: "no_match_key" };
+
+  for (const attempt of attempts) {
+    let candidates: CompanyCandidate[];
+    try {
+      candidates = await searchObjectsByProperty(
+        target.portalId,
+        cfg.object_type,
+        attempt.property,
+        attempt.value,
+        wanted,
+        target.privateAppToken
+      );
+    } catch (e) {
+      if (e instanceof HubspotApiError && e.status === 400) continue;
+      throw e;
+    }
+    if (!candidates.length) continue;
+    const pick = pickCompanies(candidates, {
+      buyerState: subject.buyerState,
+      buyerId: subject.buyerId,
+      config: cfg,
+      strategy: attempt.strategy,
+    });
+    return { chosen: pick.chosen, reason: pick.reason };
+  }
+  return { chosen: [], reason: "no_company_found" };
+}
+
+/** Attach companies the signal is not already linked to. Returns how many were new. */
+async function linkCompanies(
+  target: PushTarget,
+  signalObjectId: string,
+  companyIds: string[]
+): Promise<number> {
+  const cfg = target.association;
+  const existing = new Set(
+    await listAssociatedIds(
+      target.portalId,
+      target.objectType,
+      signalObjectId,
+      cfg.object_type,
+      target.privateAppToken
+    )
+  );
+  const toLink = companyIds.filter((id) => !existing.has(id));
+  for (const companyId of toLink) {
+    await associateObjects(
+      target.portalId,
+      target.objectType,
+      signalObjectId,
+      cfg.object_type,
+      companyId,
+      cfg.association_type_id,
+      target.privateAppToken
+    );
+  }
+  return toLink.length;
 }
 
 /**
@@ -841,7 +1110,7 @@ async function executePush(
           createProps,
           target.privateAppToken
         );
-        const association = await associateCompany(target, signal, id, fields.contact_email);
+        const association = await associateCompany(target, signalSubject(signal, fields.contact_email), id);
         return {
           status: "ok",
           action: "created",
@@ -867,7 +1136,7 @@ async function executePush(
     );
     // Re-checked on UPDATE too, not just CREATE: the association is the point of
     // the record, and every previously-pushed signal is currently missing one.
-    const association = await associateCompany(target, signal, objectId, fields.contact_email);
+    const association = await associateCompany(target, signalSubject(signal, fields.contact_email), objectId);
     return {
       status: "ok",
       action: "updated",

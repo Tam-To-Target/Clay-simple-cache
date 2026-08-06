@@ -958,6 +958,46 @@ attaches a company on **both create and update**, and reports the outcome in an
 **Association never fails the push** — the verdict is already written by the time
 it runs, so a HubSpot hiccup degrades to "unassociated + reported".
 
+**\`reason\` is the code to branch on.** It is present whenever the signal did not
+land on a company (and on \`company_created\`). The prose in \`warning\` is for a
+human reading one response; \`reason\` is for a caller deciding what to do:
+
+| \`reason\` | Means | What to do |
+|---|---|---|
+| \`no_company_found\` | Every rung searched, nothing matched | **The account is not in the CRM.** Create the company, then re-push (or run the backfill). |
+| \`no_match_key\` | Signal has no buyerId, domain or buyer name | Nothing to match on — a Starbridge data gap, not a CRM gap. |
+| \`state_mismatch\` | A name matched, but in the wrong state | Refused deliberately. Add the real company, or stamp the buyer id on the right one. |
+| \`ambiguous_match\` | Several matched and \`on_multiple:"skip"\` | Dedupe the companies, or switch to \`"primary"\`. |
+| \`company_created\` | Nothing matched, so a company was created | Only with \`create_missing_company: true\`. Verify it is not a duplicate. |
+| \`hubspot_error\` | The association call itself failed | Transient/permissions — re-run the backfill. |
+
+So "the company is not there" is detectable as
+\`association.status === "none" && association.reason === "no_company_found"\`.
+
+### POST /relevance-associate/:client_id (backfill)
+
+Attach companies to Signal records that already exist in HubSpot but have none —
+everything pushed before association shipped. It reads the buyer spine off the
+**record** (\`sb_buyer_id\`, \`sb_buyer_name\`, \`sb_buyer_state\`,
+\`sb_contact_email\`) and runs the same ladder, so it needs **no Starbridge fetch
+and no model call** — a re-score would re-bill for a verdict that has not changed.
+
+\`GET\` is a dry run using the same resolution code, so the preview cannot
+disagree with what \`POST\` would do. \`?limit=N\` caps how many records are
+examined. Records that already have a company are skipped, so it is safe to
+re-run.
+
+\`\`\`json
+POST /relevance-associate/hilight
+{
+  "examined": 112, "already_associated": 12, "associated": 79,
+  "still_unassociated": 21,
+  "by_reason": { "no_company_found": 19, "state_mismatch": 2 },
+  "unmatched_sample": [{ "id": "577…", "buyer": "Dover Public School District", "reason": "no_company_found" }],
+  "failures": []
+}
+\`\`\`
+
 **The match ladder.** Strategies are tried in order and the FIRST one returning
 any candidate wins — a buyer-id hit is never second-guessed by a name search:
 
@@ -979,11 +1019,15 @@ NC and Cherokee County SC. \`on_multiple\` decides:
 - \`"all"\` — associate every match.
 - \`"skip"\` — associate nothing and warn.
 
-**Companies are never created.** Starbridge emits buyers at three granularities
-that collapse onto one domain — district, individual school, and *program* — so
-blanket-creating a company per unmatched buyer measured **5 junk records out of
-6**. \`create_missing_company\` exists for clients who accept that trade; it
-defaults to \`false\`.
+**Companies are never created by default.** Starbridge emits buyers at three
+granularities that collapse onto one domain — district, individual school, and
+*program* — so blanket-creating a company per unmatched buyer measured **5 junk
+records out of 6**. With \`create_missing_company: false\` (the default) an
+unmatched signal returns \`reason: "no_company_found"\` and stays unassociated,
+which is the signal to add the account. Setting it to \`true\` creates a company
+from the buyer's name/domain/state/buyer-id and stamps the result
+\`reason: "company_created"\` plus \`company_created: true\`, so anything it makes
+is auditable.
 
 \`\`\`json
 PUT /relevance-config/hilight
