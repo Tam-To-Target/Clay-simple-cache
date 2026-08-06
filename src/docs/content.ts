@@ -936,6 +936,82 @@ Dates are normalized on the way out: Starbridge returns nanosecond precision
 (\`2026-07-27T04:38:58.148935331Z\`), which HubSpot rejects, so it is truncated to
 milliseconds.
 
+### Company association (on by default)
+
+A tiered signal with no company on it cannot roll up to an account, be filtered
+by owner, or reach the rep who works that district — so the push resolves and
+attaches a company on **both create and update**, and reports the outcome in an
+\`association\` block on the response:
+
+\`\`\`json
+"association": {
+  "status": "associated",
+  "company_ids": ["29310427519"],
+  "strategy": "buyer_id",
+  "matched_on": "67f47780-99e5-489e-88c8-471fc3ab8d48",
+  "warning": "2 companies matched by buyer_id — associated to 29310427519, ignored 46599467633. …"
+}
+\`\`\`
+
+\`status\` is one of \`associated\` (linked now), \`already\` (link existed),
+\`none\` (nothing matched), \`skipped\` (disabled), \`failed\` (HubSpot error).
+**Association never fails the push** — the verdict is already written by the time
+it runs, so a HubSpot hiccup degrades to "unassociated + reported".
+
+**The match ladder.** Strategies are tried in order and the FIRST one returning
+any candidate wins — a buyer-id hit is never second-guessed by a name search:
+
+| Strategy | Company property | Notes |
+|---|---|---|
+| \`buyer_id\` | \`starbridge_buyer_id\` | The only 1:1 crosswalk. **Not a HubSpot standard property** — it is written by the client's own Starbridge→HubSpot account sync, so it is absent on some portals and named differently on others. Set \`buyer_id_property\` accordingly. |
+| \`domain\` | \`domain\` | From a buyer domain/website column, else the contact email's domain. Free-mail domains (gmail, outlook, …) are ignored — they identify a person, not an account. |
+| \`name\` | \`name\` | Exact buyer-name match. Last resort. |
+
+**Multiple hits are the normal case, not the edge case.** \`starbridge_buyer_id\`
+is not unique: on Hilight, Schenectady City School District has two company
+records under one buyer id, and one buyer id is stamped on both Cherokee County
+NC and Cherokee County SC. \`on_multiple\` decides:
+
+- \`"primary"\` (default) — tie-break on **state agreement** (normalizing
+  "New York" → "NY"), then on which record already carries the buyer id, then on
+  the oldest record id. Always terminates, so a signal is never silently dropped;
+  the losers are named in \`warning\` so the duplicates get cleaned up.
+- \`"all"\` — associate every match.
+- \`"skip"\` — associate nothing and warn.
+
+**Companies are never created.** Starbridge emits buyers at three granularities
+that collapse onto one domain — district, individual school, and *program* — so
+blanket-creating a company per unmatched buyer measured **5 junk records out of
+6**. \`create_missing_company\` exists for clients who accept that trade; it
+defaults to \`false\`.
+
+\`\`\`json
+PUT /relevance-config/hilight
+{
+  "hubspot_push": {
+    "association": {
+      "enabled": true,
+      "object_type": "0-2",
+      "strategies": ["buyer_id", "domain", "name"],
+      "buyer_id_property": "starbridge_buyer_id",
+      "on_multiple": "primary",
+      "association_type_id": null,
+      "create_missing_company": false
+    }
+  }
+}
+\`\`\`
+
+\`association_type_id: null\` uses HubSpot's **default** association type for the
+object pair. Hardcoding the numeric id (792 for Signal→Company on Hilight) is
+portal-specific and would break on the next portal — set it only when a client
+needs a labeled association.
+
+\`GET /relevance-provision/:client_id\` reports the company side at setup time:
+whether each property exists **and how many companies actually carry it**. A
+buyer-id property that exists but is populated on 0 companies is worse than a
+missing one, because it looks configured — that case is called out explicitly.
+
 ### HubSpot private-app token (per client, required for push)
 
 Record read/search/write on the Signal object is **not available to a public OAuth

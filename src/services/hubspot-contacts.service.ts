@@ -211,6 +211,151 @@ export async function searchObjectIdsByProperty(
   return (json.results || []).map((r) => r.id);
 }
 
+/**
+ * Like `searchObjectIdsByProperty` but returns the requested properties too.
+ *
+ * The relevance push needs them: when several companies share a Starbridge
+ * buyer id it disambiguates on state and on which record carries the buyer id,
+ * and it cannot do that from bare ids without a second round-trip per candidate.
+ */
+export async function searchObjectsByProperty(
+  portalId: string,
+  objectType: string,
+  property: string,
+  value: string,
+  properties: string[],
+  tokenOverride?: string,
+  limit = 25
+): Promise<Array<{ id: string; properties: Record<string, any> }>> {
+  const res = await hsFetch(
+    portalId,
+    `/crm/v3/objects/${encodeURIComponent(objectType)}/search`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        filterGroups: [{ filters: [{ propertyName: property, operator: "EQ", value }] }],
+        properties: Array.from(new Set([property, ...properties])),
+        limit,
+      }),
+    },
+    tokenOverride
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new HubspotApiError(
+      `Search ${objectType} by ${property} failed: HTTP ${res.status} ${body}`,
+      res.status
+    );
+  }
+  const json = (await res.json()) as { results?: Array<{ id: string; properties?: Record<string, any> }> };
+  return (json.results || []).map((r) => ({ id: r.id, properties: r.properties || {} }));
+}
+
+/**
+ * How many records have `property` set to anything. Used at relevance-provision
+ * time to answer the question that actually matters about the association key:
+ * not "does the property exist" but "is it populated enough to match on".
+ */
+export async function countObjectsWithProperty(
+  portalId: string,
+  objectType: string,
+  property: string,
+  tokenOverride?: string
+): Promise<number> {
+  const res = await hsFetch(
+    portalId,
+    `/crm/v3/objects/${encodeURIComponent(objectType)}/search`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        filterGroups: [{ filters: [{ propertyName: property, operator: "HAS_PROPERTY" }] }],
+        properties: [property],
+        limit: 1,
+      }),
+    },
+    tokenOverride
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new HubspotApiError(
+      `Count ${objectType} with ${property} failed: HTTP ${res.status} ${body}`,
+      res.status
+    );
+  }
+  const json = (await res.json()) as { total?: number };
+  return typeof json.total === "number" ? json.total : 0;
+}
+
+/** Ids of every `toObjectType` record already associated with `objectId`. */
+export async function listAssociatedIds(
+  portalId: string,
+  objectType: string,
+  objectId: string,
+  toObjectType: string,
+  tokenOverride?: string
+): Promise<string[]> {
+  const res = await hsFetch(
+    portalId,
+    `/crm/v4/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}` +
+      `/associations/${encodeURIComponent(toObjectType)}?limit=100`,
+    { method: "GET" },
+    tokenOverride
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new HubspotApiError(
+      `List associations ${objectType}/${objectId} → ${toObjectType} failed: HTTP ${res.status} ${body}`,
+      res.status
+    );
+  }
+  const json = (await res.json()) as { results?: Array<{ toObjectId?: string | number }> };
+  return (json.results || []).map((r) => String(r.toObjectId)).filter(Boolean);
+}
+
+/**
+ * Associate two records.
+ *
+ * With no `associationTypeId` this uses the v4 **default** association endpoint,
+ * which lets HubSpot pick the canonical type for the object pair. That is
+ * deliberate: the Signal→Company type id (792 on Hilight) is portal-specific,
+ * and hardcoding it would break silently on the next portal. Pass an explicit id
+ * only when a client needs a labeled association.
+ */
+export async function associateObjects(
+  portalId: string,
+  fromObjectType: string,
+  fromObjectId: string,
+  toObjectType: string,
+  toObjectId: string,
+  associationTypeId?: number | null,
+  tokenOverride?: string
+): Promise<void> {
+  const from = `${encodeURIComponent(fromObjectType)}/${encodeURIComponent(fromObjectId)}`;
+  const to = `${encodeURIComponent(toObjectType)}/${encodeURIComponent(toObjectId)}`;
+  const path =
+    associationTypeId === undefined || associationTypeId === null
+      ? `/crm/v4/objects/${from}/associations/default/${to}`
+      : `/crm/v4/objects/${from}/associations/${to}`;
+  const init: RequestInit =
+    associationTypeId === undefined || associationTypeId === null
+      ? { method: "PUT" }
+      : {
+          method: "PUT",
+          body: JSON.stringify([
+            { associationCategory: "HUBSPOT_DEFINED", associationTypeId },
+          ]),
+        };
+  const res = await hsFetch(portalId, path, init, tokenOverride);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new HubspotApiError(
+      `Associate ${fromObjectType}/${fromObjectId} → ${toObjectType}/${toObjectId} failed: ` +
+        `HTTP ${res.status} ${body}`,
+      res.status
+    );
+  }
+}
+
 /** Read selected `properties` of an object by id. Returns the properties map. */
 export async function getObjectProperties(
   portalId: string,

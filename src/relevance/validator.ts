@@ -16,6 +16,7 @@
  */
 import { DEFAULT_TIERS } from "./types";
 import { FIELD_NAMES } from "./hubspot-fields";
+import { DEFAULT_STRATEGIES } from "./association";
 import type { RelevanceConfigDoc, RelevancePromptConfig } from "./types";
 
 export interface ValidationError {
@@ -47,6 +48,9 @@ const FORBIDDEN_PROMPT_PATTERNS: Array<{ re: RegExp; why: string }> = [
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
+
+/** Association strategies accepted in `hubspot_push.association.strategies`. */
+const ALLOWED_STRATEGIES: string[] = DEFAULT_STRATEGIES;
 
 function validatePrompt(
   p: unknown,
@@ -227,6 +231,62 @@ export function validateRelevanceConfig(input: unknown): ValidationResult {
               "hubspot_push.field_map.name",
               "cannot be disabled while create_missing is enabled — hs_name is a required property on create"
             );
+          }
+        }
+      }
+      // ── association ──────────────────────────────────────────────────────
+      // Misconfiguring this does not fail loudly at push time (association
+      // errors are non-fatal by design), so it has to fail loudly here instead.
+      if (push.association !== undefined) {
+        const assoc = push.association as any;
+        if (!isObject(assoc)) {
+          err("hubspot_push.association", "must be an object");
+        } else {
+          if (assoc.enabled !== undefined && typeof assoc.enabled !== "boolean") {
+            err("hubspot_push.association.enabled", "must be a boolean");
+          }
+          for (const f of [
+            "object_type", "buyer_id_property", "domain_property", "name_property", "state_property",
+          ] as const) {
+            if (assoc[f] !== undefined && (typeof assoc[f] !== "string" || !assoc[f].trim())) {
+              err(`hubspot_push.association.${f}`, "must be a non-empty string when present");
+            }
+          }
+          if (assoc.strategies !== undefined) {
+            if (!Array.isArray(assoc.strategies) || !assoc.strategies.length) {
+              err(
+                "hubspot_push.association.strategies",
+                `must be a non-empty array ordered by preference (allowed: ${ALLOWED_STRATEGIES.join(", ")})`
+              );
+            } else {
+              for (const s of assoc.strategies) {
+                if (!ALLOWED_STRATEGIES.includes(s)) {
+                  err(
+                    "hubspot_push.association.strategies",
+                    `unknown strategy "${s}" (allowed: ${ALLOWED_STRATEGIES.join(", ")})`
+                  );
+                }
+              }
+            }
+          }
+          if (assoc.on_multiple !== undefined && !["primary", "all", "skip"].includes(String(assoc.on_multiple))) {
+            err("hubspot_push.association.on_multiple", 'must be one of "primary", "all", "skip"');
+          }
+          if (
+            assoc.association_type_id !== undefined &&
+            assoc.association_type_id !== null &&
+            (typeof assoc.association_type_id !== "number" || !Number.isInteger(assoc.association_type_id))
+          ) {
+            err(
+              "hubspot_push.association.association_type_id",
+              "must be an integer, or null to use HubSpot's default association type for the pair"
+            );
+          }
+          if (
+            assoc.create_missing_company !== undefined &&
+            typeof assoc.create_missing_company !== "boolean"
+          ) {
+            err("hubspot_push.association.create_missing_company", "must be a boolean");
           }
         }
       }

@@ -15,6 +15,7 @@
  * Prompts are DATA (per-client, per-signal-type). If a signal type needs
  * different *handling* rather than different wording, add it in code.
  */
+import type { AssociationConfig } from "./association";
 
 /** Fixed tier → points mapping. Points are derived in code from the tier the
  *  model picks; the model's own numeric output is ignored. */
@@ -112,6 +113,13 @@ export interface RelevanceHubspotPushConfig {
    * re-pushing it would reset a status a rep changed in HubSpot.
    */
   create_only_fields?: string[];
+  /**
+   * Company association. A signal with no company on it cannot roll up to an
+   * account or reach the rep who owns it, so this is ON by default and runs on
+   * both create and update. See relevance/association.ts for the match ladder
+   * and why company CREATION is off by default.
+   */
+  association?: Partial<AssociationConfig>;
   /**
    * WRITE-ONLY. HubSpot private-app token used **only** by this endpoint's push
    * for this client. Required because record access to the Signal object is not
