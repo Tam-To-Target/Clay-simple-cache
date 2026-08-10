@@ -1,10 +1,16 @@
 /**
- * Client registry — the committed map of client slug -> HubSpot portal.
+ * Client registry — the committed map of client slug -> CRM + PhoneBurner dialers.
  *
  * Generated ONCE by `npm run clients:generate` (joins the tokens DB with the
  * SDR Launch clients table, which is itself synced from Airtable). Stored at
  * `data/clients.json` and committed so the runtime never needs the SDR Launch
  * DB. Re-run the generator when the client roster changes.
+ *
+ * `portal_id` is NULLABLE: a client on Salesforce (or any non-HubSpot CRM) has
+ * no portal, but still dials in PhoneBurner and therefore still needs its DNC
+ * enforced. Keying the registry on the portal used to silence those clients
+ * entirely — their PB seats were never registered, so the purge skipped them.
+ * Anything HubSpot-specific must branch on `portal_id` being non-null.
  */
 import fs from "fs";
 import path from "path";
@@ -19,10 +25,13 @@ export interface RegistryPbMember {
 
 export interface RegistryClient {
   slug: string;
-  portal_id: string;
+  /** HubSpot portal id, or null for a client whose CRM isn't HubSpot (e.g. Salesforce). */
+  portal_id: string | null;
   name: string;
   client_reference_name: string | null;
   domain: string | null;
+  /** GTMOS `crmPlatform` ('HubSpot' | 'Salesforce' | …), for reporting/branching. */
+  crm_platform: string | null;
   /** PhoneBurner members that dial for this client (for the DNC purge). */
   phoneburner_members?: RegistryPbMember[];
 }

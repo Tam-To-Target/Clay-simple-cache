@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-27T16:53:22.343Z",
+  "generated_at": "2026-08-04T20:03:28.503Z",
   "clients": [
     {
       "slug": "awarded-software",
@@ -7,6 +7,7 @@
       "name": "Awarded Software",
       "client_reference_name": "Awarded",
       "domain": "awardedsoftware.com",
+      "crm_platform": "HubSpot",
       "phoneburner_members": [
         {
           "pb_member_id": "1252045468",
@@ -17,11 +18,84 @@
       ]
     },
     {
+      "slug": "brainpop",
+      "portal_id": null,
+      "name": "BrainPOP",
+      "client_reference_name": "BrainPOP",
+      "domain": "brainpop.com",
+      "crm_platform": "Salesforce",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1270386525",
+          "name": "Sarah Miller",
+          "username": "sarah@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1285763300",
+          "name": "Sky Fox",
+          "username": "sky@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1285815280",
+          "name": "Ava Miller",
+          "username": "ava@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1291285814",
+          "name": "Sam Roberts",
+          "username": "sam@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "bridge-it",
+      "portal_id": "246629301",
+      "name": "Bridge-it",
+      "client_reference_name": "Bridgeit",
+      "domain": "bridge-it.ai",
+      "crm_platform": "HubSpot",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1246360446",
+          "name": "Hazel John",
+          "username": "hazel@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "brisk-teaching",
+      "portal_id": null,
+      "name": "Brisk Teaching",
+      "client_reference_name": "Brisk",
+      "domain": "briskteaching.com",
+      "crm_platform": "Salesforce",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1246360440",
+          "name": "Michael Davids",
+          "username": "michael@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1293436142",
+          "name": "Julia Parker",
+          "username": "julia@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
       "slug": "club-hub",
       "portal_id": "23342274",
       "name": "Club Hub",
       "client_reference_name": "Club Hub",
       "domain": "clubhub.co",
+      "crm_platform": "HubSpot",
       "phoneburner_members": [
         {
           "pb_member_id": "1250993178",
@@ -34,6 +108,50 @@
           "name": "Sara Johnson",
           "username": "sara@tamtotarget.com",
           "status": "active"
+        },
+        {
+          "pb_member_id": "1297339828",
+          "name": "Luca Smith",
+          "username": "luca@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "codehs",
+      "portal_id": null,
+      "name": "CodeHS",
+      "client_reference_name": "CodeHS",
+      "domain": "codehs.com",
+      "crm_platform": "Salesforce",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1241054866",
+          "name": "Rachel Brown",
+          "username": "rachel@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "core-learning",
+      "portal_id": "242827393",
+      "name": "CORE Learning",
+      "client_reference_name": "Core Learning",
+      "domain": "corelearn.com",
+      "crm_platform": "HubSpot",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1279015036",
+          "name": "Yushri Abrahams",
+          "username": "yushri@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1294552301",
+          "name": "Samantha Wheeler",
+          "username": "samantha@tamtotarget.com",
+          "status": "active"
         }
       ]
     },
@@ -43,6 +161,7 @@
       "name": "CyberNut",
       "client_reference_name": "CyberNut",
       "domain": "cybernut.ai",
+      "crm_platform": "HubSpot",
       "phoneburner_members": [
         {
           "pb_member_id": "1255506787",
@@ -71,11 +190,104 @@
       ]
     },
     {
+      "slug": "five-star-technology-solutions",
+      "portal_id": null,
+      "name": "Five Star Technology Solutions",
+      "client_reference_name": "fivestar",
+      "domain": "fivestartech.com",
+      "crm_platform": "HubSpot",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1246360433",
+          "name": "Lily Marks",
+          "username": "lily@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1286018597",
+          "name": "Serena Lane",
+          "username": "serena@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "fuzion",
+      "portal_id": null,
+      "name": "Fuzion",
+      "client_reference_name": "Fuzion",
+      "domain": "gearbyfuzion.com",
+      "crm_platform": "None / Not set up",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1240676806",
+          "name": "Ammi Mullugeta",
+          "username": "ammi@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "geographic-technologies-group",
+      "portal_id": "3975112",
+      "name": "Geographic Technologies Group",
+      "client_reference_name": "GTG",
+      "domain": "geotg.com",
+      "crm_platform": "HubSpot",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1270384978",
+          "name": "Florence Brown",
+          "username": "florence@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "harris",
+      "portal_id": null,
+      "name": "Harris",
+      "client_reference_name": null,
+      "domain": null,
+      "crm_platform": null,
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1255725556",
+          "name": "Hannah Collins",
+          "username": "hannah@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "highpoint",
+      "portal_id": null,
+      "name": "HighPoint",
+      "client_reference_name": "HighPoint",
+      "domain": "highpoint.io",
+      "crm_platform": "None / Not set up",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1240676806",
+          "name": "Ammi Mullugeta",
+          "username": "ammi@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1252045468",
+          "name": "Bessie Marvin",
+          "username": "bessie@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
       "slug": "hilight",
       "portal_id": "22493085",
       "name": "Hilight",
       "client_reference_name": "Hilight",
       "domain": "hilightedu.com",
+      "crm_platform": "HubSpot",
       "phoneburner_members": [
         {
           "pb_member_id": "1287143131",
@@ -91,11 +303,50 @@
       "name": "Kaleidoscope",
       "client_reference_name": "Kaleidoscope",
       "domain": "mykaleidoscope.com",
+      "crm_platform": "HubSpot",
       "phoneburner_members": [
         {
           "pb_member_id": "1246360446",
           "name": "Hazel John",
-          "username": "hazel@rhosales.com",
+          "username": "hazel@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "kreative-core-technologies",
+      "portal_id": null,
+      "name": "Kreative Core Technologies",
+      "client_reference_name": "KCT",
+      "domain": "kreativecoretech.com",
+      "crm_platform": "HubSpot",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1297339822",
+          "name": "Ruby Hill",
+          "username": "ruby@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "maialearning",
+      "portal_id": null,
+      "name": "MaiaLearning",
+      "client_reference_name": "MaiaLearning",
+      "domain": "maialearning.com",
+      "crm_platform": "None / Not set up",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1240676800",
+          "name": "Yoseph Mekbib",
+          "username": "yoseph@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1285015908",
+          "name": "Catherine Mukami",
+          "username": "catherine@tamtotarget.com",
           "status": "active"
         }
       ]
@@ -106,11 +357,42 @@
       "name": "Mastra AI",
       "client_reference_name": "Mastra",
       "domain": "mastra.ai",
+      "crm_platform": "HubSpot",
       "phoneburner_members": [
         {
           "pb_member_id": "1285763356",
           "name": "Mary Brown",
           "username": "mary@tamtotarget.com",
+          "status": "inactive"
+        },
+        {
+          "pb_member_id": "1293313973",
+          "name": "Beth Brown",
+          "username": "beth@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "nido-learning",
+      "portal_id": "46773168",
+      "name": "Nido Learning",
+      "client_reference_name": "Nido",
+      "domain": "nidolearning.com",
+      "crm_platform": "HubSpot"
+    },
+    {
+      "slug": "paramify",
+      "portal_id": null,
+      "name": "Paramify",
+      "client_reference_name": "Paramify",
+      "domain": "paramify.com",
+      "crm_platform": "HubSpot",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1276432825",
+          "name": "Caleb Brown",
+          "username": "caleb@tamtotarget.com",
           "status": "active"
         }
       ]
@@ -121,17 +403,18 @@
       "name": "Pathwise",
       "client_reference_name": "Pathwise",
       "domain": "transact.com",
+      "crm_platform": "HubSpot",
       "phoneburner_members": [
         {
           "pb_member_id": "1246360433",
           "name": "Lily Marks",
-          "username": "lily@rhosales.com",
+          "username": "lily@tamtotarget.com",
           "status": "active"
         },
         {
           "pb_member_id": "1246360440",
           "name": "Michael Davids",
-          "username": "michael@rhosales.com",
+          "username": "michael@tamtotarget.com",
           "status": "active"
         },
         {
@@ -145,6 +428,68 @@
           "name": "Sarah Miller",
           "username": "sarah@tamtotarget.com",
           "status": "active"
+        },
+        {
+          "pb_member_id": "1286018597",
+          "name": "Serena Lane",
+          "username": "serena@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "pblworks",
+      "portal_id": null,
+      "name": "PBLWorks",
+      "client_reference_name": "PBLWorks",
+      "domain": "pblworks.org",
+      "crm_platform": "Salesforce",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1255725556",
+          "name": "Hannah Collins",
+          "username": "hannah@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1270386531",
+          "name": "Ella Davis",
+          "username": "ella@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1278090494",
+          "name": "Heather Grey",
+          "username": "heather@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "plan-it-software",
+      "portal_id": null,
+      "name": "Plan-It Software",
+      "client_reference_name": "PlanIt",
+      "domain": "cipsoftware.com",
+      "crm_platform": "Attio",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1250993178",
+          "name": "Prince Derek",
+          "username": "prince@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1270386531",
+          "name": "Ella Davis",
+          "username": "ella@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1278416116",
+          "name": "Grace Williams",
+          "username": "grace@tamtotarget.com",
+          "status": "inactive"
         }
       ]
     },
@@ -154,6 +499,7 @@
       "name": "RedDrop",
       "client_reference_name": "RedDrop",
       "domain": "tryreddrop.com",
+      "crm_platform": "HubSpot",
       "phoneburner_members": [
         {
           "pb_member_id": "1270387234",
@@ -169,6 +515,7 @@
       "name": "Scantron",
       "client_reference_name": "Scantron",
       "domain": "scantron.com",
+      "crm_platform": "HubSpot",
       "phoneburner_members": [
         {
           "pb_member_id": "1250993178",
@@ -185,11 +532,50 @@
       ]
     },
     {
+      "slug": "screencastify",
+      "portal_id": null,
+      "name": "ScreenCastify",
+      "client_reference_name": "Castify",
+      "domain": "screencastify.com",
+      "crm_platform": "Salesforce",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1278416122",
+          "name": "Evelyn Ritchie",
+          "username": "evelyn@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1285763300",
+          "name": "Sky Fox",
+          "username": "sky@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "spur",
+      "portal_id": null,
+      "name": "Spur",
+      "client_reference_name": "Spur",
+      "domain": "spureducation.com",
+      "crm_platform": "HubSpot",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1270384978",
+          "name": "Florence Brown",
+          "username": "florence@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
       "slug": "stellic",
       "portal_id": "3313790",
       "name": "Stellic",
       "client_reference_name": "Stellic",
       "domain": "stellic.com",
+      "crm_platform": "HubSpot",
       "phoneburner_members": [
         {
           "pb_member_id": "1255725556",
@@ -205,6 +591,7 @@
       "name": "StudentBridge",
       "client_reference_name": "StudentBridge",
       "domain": "studentbridge.com",
+      "crm_platform": "HubSpot",
       "phoneburner_members": [
         {
           "pb_member_id": "1270387091",
@@ -227,11 +614,56 @@
       ]
     },
     {
+      "slug": "studer-education",
+      "portal_id": "45913680",
+      "name": "Studer Education",
+      "client_reference_name": "Studer",
+      "domain": "studereducation.com",
+      "crm_platform": "HubSpot",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1293582290",
+          "name": "Kelly Jones",
+          "username": "kelly@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "suraasa",
+      "portal_id": null,
+      "name": "Suraasa",
+      "client_reference_name": "Suraasa",
+      "domain": "suraasa.com",
+      "crm_platform": "HubSpot",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1270387261",
+          "name": "Lidya Baker",
+          "username": "lidya@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1276242864",
+          "name": "John David",
+          "username": "johnd@tamtotarget.com",
+          "status": "active"
+        },
+        {
+          "pb_member_id": "1276432825",
+          "name": "Caleb Brown",
+          "username": "caleb@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
       "slug": "tam-to-target",
       "portal_id": "244264386",
       "name": "TAM to Target",
       "client_reference_name": "TAMtoTarget",
       "domain": "tamtotarget.com",
+      "crm_platform": "HubSpot",
       "phoneburner_members": [
         {
           "pb_member_id": "1279015036",
@@ -240,11 +672,43 @@
           "status": "active"
         }
       ]
+    },
+    {
+      "slug": "tassel",
+      "portal_id": null,
+      "name": "Tassel",
+      "client_reference_name": "Tassel",
+      "domain": "tassel.com",
+      "crm_platform": "None / Not set up",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1240676806",
+          "name": "Ammi Mullugeta",
+          "username": "ammi@tamtotarget.com",
+          "status": "active"
+        }
+      ]
+    },
+    {
+      "slug": "the-commons",
+      "portal_id": null,
+      "name": "The Commons",
+      "client_reference_name": "TheCommons",
+      "domain": "the-commons.app",
+      "crm_platform": "HubSpot",
+      "phoneburner_members": [
+        {
+          "pb_member_id": "1255565269",
+          "name": "John Thomas",
+          "username": "john@tamtotarget.com",
+          "status": "active"
+        }
+      ]
     }
   ],
   "unmapped_portals": [
-    "242827393",
-    "3975112",
+    "24251729",
+    "242803818",
     "85896"
   ]
 }

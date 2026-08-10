@@ -42,8 +42,17 @@ async function main() {
     const client = await clientService.upsert({
       external_id: rc.slug,
       name: rc.name,
-      hubspot_portal_id: rc.portal_id,
+      hubspot_portal_id: rc.portal_id ?? undefined,
     });
+
+    // Portal-less client (Salesforce et al): there are no HubSpot lists to
+    // discover, so skip straight past discovery. The client row still exists and
+    // its CSV-sourced DNC + PhoneBurner seats work exactly as usual — only the
+    // HubSpot-list leg is inapplicable.
+    if (!rc.portal_id) {
+      console.log(`○ ${rc.slug} — no HubSpot portal (${rc.crm_platform ?? "CRM ?"}); CSV/PB only`);
+      continue;
+    }
 
     const { discover, sync } = await discoverAndSyncClient(client);
 
