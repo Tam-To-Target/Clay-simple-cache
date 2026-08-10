@@ -8,6 +8,8 @@ vi.mock("../../src/services/hubspot-lists.service", async (importActual) => {
     ...actual,
     searchDncLists: vi.fn(),
     fetchListContacts: vi.fn(),
+    fetchListCompanies: vi.fn(),
+    fetchListObjectType: vi.fn(),
     fetchListSize: vi.fn(),
   };
 });
@@ -55,7 +57,14 @@ vi.mock("../../src/db/prisma", () => ({
   },
 }));
 
-import { classifyDncList, searchDncLists, fetchListContacts, fetchListSize } from "../../src/services/hubspot-lists.service";
+import {
+  classifyDncList,
+  searchDncLists,
+  fetchListContacts,
+  fetchListCompanies,
+  fetchListObjectType,
+  fetchListSize,
+} from "../../src/services/hubspot-lists.service";
 import { getValidToken, HubspotAccessError } from "../../src/services/hubspot-token.service";
 import { dncService } from "../../src/services/dnc.service";
 import { suggestSimilar } from "../../src/services/suggest";
@@ -72,6 +81,8 @@ import {
 const mockPrisma = prisma as any;
 const searchDncListsMock = searchDncLists as any;
 const fetchListContactsMock = fetchListContacts as any;
+const fetchListCompaniesMock = fetchListCompanies as any;
+const fetchListObjectTypeMock = fetchListObjectType as any;
 const fetchListSizeMock = fetchListSize as any;
 const diffSourceEntriesMock = dncService.diffSourceEntries as any;
 
@@ -171,6 +182,8 @@ function makeSource(over: Partial<any> = {}) {
 beforeEach(() => {
   vi.clearAllMocks();
   (getValidToken as any).mockResolvedValue("tok");
+  // Default every source to a CONTACT list; the company-list suite overrides it.
+  fetchListObjectTypeMock.mockResolvedValue("0-1");
   mockPrisma.dncSource.update.mockResolvedValue({});
   mockPrisma.dncSource.upsert.mockResolvedValue({});
   mockPrisma.dncEntry.findMany.mockResolvedValue([]);
@@ -344,6 +357,92 @@ describe("syncHubspotSource — incremental known-map reconstruction", () => {
 
     const entries = diffSourceEntriesMock.mock.calls[0][3];
     expect(entries[0].data).toMatchObject({ hubspot_contact_id: "1", email_domain: "acme.com" });
+  });
+});
+
+describe("syncHubspotSource — COMPANY-object lists", () => {
+  const companySource = (over: Partial<any> = {}) =>
+    makeSource({
+      dnc_level: "domain",
+      label: "TAM Current Customers - DO NOT CONTACT",
+      hubspot_list_id: "894",
+      ...over,
+    });
+
+  beforeEach(() => {
+    fetchListObjectTypeMock.mockResolvedValue("0-2");
+  });
+
+  it("reads members via fetchListCompanies (not fetchListContacts) and derives one domain entry each", async () => {
+    fetchListCompaniesMock.mockResolvedValue([
+      { hubspot_id: "c1", email: null, phone: null, email_domain: "aacps.org" },
+      { hubspot_id: "c2", email: null, phone: null, email_domain: "aesd.net" },
+    ]);
+    diffSourceEntriesMock.mockResolvedValue({ count: 2, added: 2, removed: 0, changed: true });
+
+    const result = await syncHubspotSource(CLIENT, companySource(), { currentSize: 2, force: true });
+
+    expect(result.status).toBe("ok");
+    expect(fetchListCompaniesMock).toHaveBeenCalledTimes(1);
+    expect(fetchListContactsMock).not.toHaveBeenCalled();
+
+    // Only domain rows — a company has no email/phone to suppress individually.
+    const entries = diffSourceEntriesMock.mock.calls[0][3];
+    expect(entries).toHaveLength(2);
+    expect(entries.map((e: any) => e.domain).sort()).toEqual(["aacps.org", "aesd.net"]);
+    expect(entries.every((e: any) => e.email === null && e.phone_e164 === null)).toBe(true);
+    expect(result.domain_count).toBe(2);
+  });
+
+  it("errors instead of silently importing nothing when a company list is pinned as individual", async () => {
+    const result = await syncHubspotSource(CLIENT, companySource({ dnc_level: "individual" }), {
+      currentSize: 2,
+      force: true,
+    });
+
+    expect(result.status).toBe("error");
+    expect(result.error).toMatch(/COMPANY list/i);
+    expect(result.error).toMatch(/dnc_level='domain'/);
+    expect(fetchListCompaniesMock).not.toHaveBeenCalled();
+    expect(fetchListContactsMock).not.toHaveBeenCalled();
+  });
+
+  it("errors when the segment has members but none carries a domain or website", async () => {
+    fetchListCompaniesMock.mockResolvedValue([
+      { hubspot_id: "c1", email: null, phone: null, email_domain: null },
+      { hubspot_id: "c2", email: null, phone: null, email_domain: null },
+    ]);
+
+    const result = await syncHubspotSource(CLIENT, companySource(), { currentSize: 2, force: true });
+
+    expect(result.status).toBe("error");
+    expect(result.error).toMatch(/none has a 'domain' or 'website'/);
+    expect(diffSourceEntriesMock).not.toHaveBeenCalled();
+  });
+
+  it("still syncs when only SOME members lack a domain", async () => {
+    fetchListCompaniesMock.mockResolvedValue([
+      { hubspot_id: "c1", email: null, phone: null, email_domain: "aacps.org" },
+      { hubspot_id: "c2", email: null, phone: null, email_domain: null },
+    ]);
+    diffSourceEntriesMock.mockResolvedValue({ count: 1, added: 1, removed: 0, changed: true });
+
+    const result = await syncHubspotSource(CLIENT, companySource(), { currentSize: 2, force: true });
+
+    expect(result.status).toBe("ok");
+    expect(diffSourceEntriesMock.mock.calls[0][3]).toHaveLength(1);
+  });
+
+  it("does not build an incremental known-map for a company list", async () => {
+    fetchListCompaniesMock.mockResolvedValue([
+      { hubspot_id: "c1", email: null, phone: null, email_domain: "aacps.org" },
+    ]);
+    const source = companySource({ last_list_size: 1, last_sync_status: "ok", last_full_sync_at: new Date() });
+
+    await syncHubspotSource(CLIENT, source, { currentSize: 99 });
+
+    expect(mockPrisma.dncEntry.findMany).not.toHaveBeenCalled();
+    expect(fetchListCompaniesMock).toHaveBeenCalledTimes(1);
   });
 });
 

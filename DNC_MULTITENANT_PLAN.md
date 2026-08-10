@@ -24,7 +24,9 @@ members into the cache, and keeping them fresh daily.
   portal ↔ client link exists (Airtable's Master Client Board has the client
   reference + domain but **no portal id**).
 - **Discovery works**: `POST /crm/v3/lists/search {query:"TAM - Do Not Contact"}`
-  returns the lists per portal. All DNC lists are **contact** lists (`objectTypeId 0-1`).
+  returns the lists per portal. Every list discovered at the time of writing was a
+  **contact** list (`objectTypeId 0-1`); **company** lists (`0-2`) are supported
+  too — see *Known limitation* below.
 
 ### Portal → slug mapping (13 of 14 resolved)
 
@@ -124,11 +126,20 @@ HTTP-cron alternative: `POST /admin/dnc/discover` then `POST /admin/dnc/sync`.
 ---
 
 ## Known limitation (documented)
-DNC lists are dynamic **contact** lists. A brand-new contact at a suppressed
-company is blocked only after HubSpot adds it to the (Domain) list **and** we
-re-sync (daily). Domain expansion mitigates this for any company that already has
-≥1 listed contact with a corporate email. True zero-day company blocking would
-need a company-domain feed (CSV `domain` column) — out of scope.
+A **contact** list is dynamic, so a brand-new contact at a suppressed company is
+blocked only after HubSpot adds it to the (Domain) list **and** we re-sync
+(daily). Domain expansion mitigates this for any company that already has ≥1
+listed contact with a corporate email.
+
+**Superseded in part:** zero-day company blocking no longer needs a CSV feed. A
+DNC segment may now be built on the **company** object (`objectTypeId 0-2`): the
+sync reads each member's `domain` (falling back to `website`) and writes one
+domain entry per company, so a company with no contacts yet is still suppressed.
+A company carries no email/phone, so such a list is inherently domain-level and
+is **rejected** if pinned as `individual` — both at pin time
+(`dnc.controller.addList`) and on sync (`syncHubspotSource`). A company list whose
+members have no `domain`/`website` is reported as an error rather than syncing
+zero entries quietly. See `fetchListCompanies` / `COMPANY_OBJECT_TYPE`.
 
 ## Validation (run live after build)
 1. `npm run clients:generate` → registry written (13 clients + 85896 flagged).

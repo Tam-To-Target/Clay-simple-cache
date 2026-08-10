@@ -17,7 +17,7 @@ import {
   discoverAndSyncAll,
   discoverAndSyncClient,
 } from "../services/dnc-sync.service";
-import { fetchListById, searchLists } from "../services/hubspot-lists.service";
+import { fetchListById, searchLists, COMPANY_OBJECT_TYPE } from "../services/hubspot-lists.service";
 import { getValidToken } from "../services/hubspot-token.service";
 import { resolveClientSdrs } from "../services/phoneburner-upload.service";
 
@@ -301,6 +301,17 @@ export const dncController = {
       const meta = await fetchListById((force) => getValidToken(portalId, { force }), listId);
       if (!meta) {
         res.status(404).json({ error: `HubSpot list ${listId} not found in portal ${portalId}` });
+        return;
+      }
+      // A company-object list has no email/phone to suppress individually, so
+      // pinning one as 'individual' would import nothing. Reject it here rather
+      // than let it fail on the first sync.
+      if (meta.objectTypeId === COMPANY_OBJECT_TYPE && level !== "domain") {
+        res.status(400).json({
+          error:
+            `HubSpot list ${listId} ("${meta.name}") is a COMPANY list. Companies carry no email or ` +
+            `phone, so it can only be pinned with dnc_level='domain'.`,
+        });
         return;
       }
 

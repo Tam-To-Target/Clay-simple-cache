@@ -29,8 +29,16 @@ vi.mock("../../src/db/prisma", () => ({
   },
 }));
 
+// Pinning a list reads the list's metadata from HubSpot; only the token lookup
+// is faked (the HTTP call itself is stubbed per-test via global fetch).
+vi.mock("../../src/services/hubspot-token.service", async (importActual) => {
+  const actual = await importActual<any>();
+  return { ...actual, getValidToken: vi.fn().mockResolvedValue("tok") };
+});
+
 import app from "../../src/app";
 import prisma from "../../src/db/prisma";
+import { getValidToken } from "../../src/services/hubspot-token.service";
 
 const mockPrisma = prisma as any;
 const API_KEY = "test-dnc-key";
@@ -247,6 +255,34 @@ describe("DNC API", () => {
         dnc_level: "individual",
       });
       expect(res.status).toBe(400);
+    });
+
+    // A company list carries no email/phone, so pinning it as 'individual' would
+    // import nothing — rejected up front rather than on the first sync.
+    it("400 for a COMPANY list pinned as individual (and nothing is persisted)", async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ ...CLIENT, hubspot_portal_id: "123" });
+      (getValidToken as any).mockResolvedValue("tok");
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ list: { listId: "894", name: "TAM Customers", objectTypeId: "0-2" } }),
+          text: async () => "",
+        })
+      );
+
+      const res = await auth(request(app).post("/admin/dnc/lists")).send({
+        client_id: "cust_1",
+        hubspot_list_id: "894",
+        dnc_level: "individual",
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/COMPANY list/i);
+      expect(res.body.error).toMatch(/dnc_level='domain'/);
+      expect(mockPrisma.dncSource.upsert).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
     });
   });
 

@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   fetchListContacts,
+  fetchListCompanies,
+  fetchListObjectType,
   fetchListSize,
   searchDncLists,
   searchLists,
@@ -116,6 +118,89 @@ describe("fetchListContacts", () => {
     const throttle = vi.fn().mockResolvedValue(undefined);
     await fetchListContacts(getToken, "list1", { throttle });
     expect(throttle).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("fetchListCompanies", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("batch-reads the COMPANIES endpoint for domain + website", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonRes(200, { results: [{ recordId: "c1" }] }))
+      .mockResolvedValueOnce(
+        jsonRes(200, { results: [{ id: "c1", properties: { domain: "acme.org", website: null } }] })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const members = await fetchListCompanies(getToken, "894");
+
+    expect(fetchMock.mock.calls[1][0]).toContain("/crm/v3/objects/companies/batch/read");
+    const body = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
+    expect(body.properties).toEqual(["domain", "website"]);
+    expect(members).toEqual([{ hubspot_id: "c1", email: null, phone: null, email_domain: "acme.org" }]);
+  });
+
+  it("falls back to website and normalizes it, preferring domain when both exist", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonRes(200, { results: [{ recordId: "c1" }, { recordId: "c2" }] }))
+      .mockResolvedValueOnce(
+        jsonRes(200, {
+          results: [
+            { id: "c1", properties: { domain: null, website: "https://www.district.k12.ca.us/enroll?x=1" } },
+            { id: "c2", properties: { domain: "canonical.org", website: "https://other.org" } },
+          ],
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const members = await fetchListCompanies(getToken, "894");
+    const byId = Object.fromEntries(members.map((m) => [m.hubspot_id, m.email_domain]));
+    expect(byId.c1).toBe("district.k12.ca.us");
+    expect(byId.c2).toBe("canonical.org");
+  });
+
+  it("keeps members with neither domain nor website, as a null domain", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonRes(200, { results: [{ recordId: "c1" }] }))
+      .mockResolvedValueOnce(
+        jsonRes(200, { results: [{ id: "c1", properties: { domain: null, website: null } }] })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const members = await fetchListCompanies(getToken, "894");
+    expect(members).toEqual([{ hubspot_id: "c1", email: null, phone: null, email_domain: null }]);
+  });
+
+  it("returns an empty array for an empty list without batch-reading", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonRes(200, { results: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await fetchListCompanies(getToken, "894")).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("fetchListObjectType", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("returns the list's objectTypeId", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonRes(200, { list: { listId: "894", name: "Customers", objectTypeId: "0-2" } }))
+    );
+    expect(await fetchListObjectType(getToken, "894")).toBe("0-2");
+  });
+
+  it("returns null when the list is missing, so callers fall back to the contact path", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonRes(404, "")));
+    expect(await fetchListObjectType(getToken, "nope")).toBeNull();
+  });
+
+  it("returns null instead of throwing when HubSpot errors", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    expect(await fetchListObjectType(getToken, "894", { throttle: () => Promise.resolve() })).toBeNull();
   });
 });
 

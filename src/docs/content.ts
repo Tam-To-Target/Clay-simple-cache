@@ -217,6 +217,20 @@ A \`/dnc-check\` matches the incoming email's domain against domain-level entrie
 so domain suppression works even when the caller only sends an email. Lists are
 re-discovered and re-synced on a daily schedule (full snapshot replace per list).
 
+**Contact lists and company lists are both supported.** A DNC segment can be
+built on either CRM object:
+- A **contact** list (\`objectTypeId 0-1\`) syncs email + phone (+ HubSpot's
+  computed email domain), feeding individual and domain-level suppression.
+- A **company** list (\`objectTypeId 0-2\`) syncs each member's \`domain\` (falling
+  back to \`website\`) and yields one domain entry per company. A company has no
+  email or phone of its own, so a company list is inherently **domain-level** and
+  is rejected if pinned as \`individual\`.
+
+Two failure modes are reported explicitly rather than syncing zero entries
+quietly: a company list pinned as \`individual\`, and a company list whose members
+have no \`domain\`/\`website\` populated (nothing to derive suppression from — the
+segment itself needs fixing in HubSpot).
+
 ### 6. DNC Check
 **POST** \`/dnc-check\`
 
@@ -434,11 +448,11 @@ auto-deactivates it) and its membership is synced immediately. Idempotent per
 |---|---|---|---|
 | \`client_id\` | String | **Yes** | The client's \`external_id\` (slug). |
 | \`hubspot_list_id\` | String | **Yes** | The HubSpot list id (see *Look up HubSpot Lists*). |
-| \`dnc_level\` | String | **Yes** | \`individual\` (exact email/phone) or \`domain\` (also the member's company email domain). |
+| \`dnc_level\` | String | **Yes** | \`individual\` (exact email/phone) or \`domain\` (also the member's company email domain). A **company** list must use \`domain\`. |
 
 **Response (JSON)**: \`{ "status": "ok", "client_id": "...", "source": { … }, "sync": { "status": "ok", "entry_count": 812, … } }\`.
 
-**Errors**: \`400\` (missing/invalid fields, or client has no portal), \`404\` (unknown client, or the list id doesn't exist in that portal).
+**Errors**: \`400\` (missing/invalid fields, client has no portal, or a company list pinned as \`individual\`), \`404\` (unknown client, or the list id doesn't exist in that portal).
 
 ---
 

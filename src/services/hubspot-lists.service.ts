@@ -2,16 +2,31 @@
  * Thin HubSpot client for reading list memberships (CRM v3 Lists API).
  *
  * Flow:
- *   1. Page through GET /crm/v3/lists/{listId}/memberships → contact record IDs.
- *   2. Batch-read those contacts (POST /crm/v3/objects/contacts/batch/read)
- *      to pull email + phone properties.
+ *   1. Page through GET /crm/v3/lists/{listId}/memberships → record IDs.
+ *   2. Batch-read those records to pull the identifiers we suppress on.
+ *
+ * Two list object types are supported, because a DNC segment can be built on
+ * either object:
+ *   - CONTACT lists (`0-1`) → batch-read contacts for email + phone
+ *     (+ hs_email_domain), which feed individual AND domain-level suppression.
+ *   - COMPANY lists (`0-2`) → batch-read companies for `domain` (falling back to
+ *     `website`). A company has no email or phone of its own, so a company list
+ *     is inherently DOMAIN-level; each member yields exactly one domain entry.
+ *     Company members are surfaced as {@link HubspotListContact} with null
+ *     email/phone and the company domain in `email_domain`, so the entry-building
+ *     and diffing downstream stay object-agnostic.
  *
  * Auth is a per-client HubSpot private-app token (Bearer).
  * Works for both static and dynamic (active) lists — HubSpot resolves the
  * current membership server-side, so a daily sync keeps dynamic segments fresh.
  */
 
+import { normalizeDomain } from "./normalization";
 import { createThrottle, withRetry } from "./http-retry";
+
+/** HubSpot object type ids for the list kinds we can sync. */
+export const CONTACT_OBJECT_TYPE = "0-1";
+export const COMPANY_OBJECT_TYPE = "0-2";
 
 const HUBSPOT_BASE = "https://api.hubapi.com";
 // The v3 memberships endpoint accepts limit <= 250; using the max halves the
@@ -108,7 +123,7 @@ export async function fetchListById(
   tokenProvider: TokenProvider,
   listId: string,
   opts?: HsCallOpts
-): Promise<{ listId: string; name: string } | null> {
+): Promise<{ listId: string; name: string; objectTypeId: string | null } | null> {
   const res = await hsFetch(`/crm/v3/lists/${encodeURIComponent(listId)}`, tokenProvider, undefined, opts?.throttle);
   if (res.status === 404) return null;
   if (!res.ok) {
@@ -118,7 +133,31 @@ export async function fetchListById(
   const json = (await res.json()) as { list?: any; name?: string; listId?: string };
   const l = json.list ?? json;
   if (!l || typeof l.name !== "string") return null;
-  return { listId: String(l.listId ?? listId), name: l.name };
+  return {
+    listId: String(l.listId ?? listId),
+    name: l.name,
+    objectTypeId: l.objectTypeId != null ? String(l.objectTypeId) : null,
+  };
+}
+
+/**
+ * Which CRM object a list is built on (`0-1` contacts, `0-2` companies).
+ *
+ * Never throws: a 404/error/unparseable response returns null, which callers
+ * treat as "assume contacts" — the historical behaviour, so a transient HubSpot
+ * failure degrades to the old code path instead of aborting a sync.
+ */
+export async function fetchListObjectType(
+  tokenProvider: TokenProvider,
+  listId: string,
+  opts?: HsCallOpts
+): Promise<string | null> {
+  try {
+    const meta = await fetchListById(tokenProvider, listId, opts);
+    return meta?.objectTypeId ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -295,13 +334,28 @@ export async function batchReadContactProperties(
   properties: string[],
   opts?: HsCallOpts
 ): Promise<Map<string, Record<string, string | null>>> {
+  return batchReadObjectProperties(tokenProvider, "contacts", ids, properties, opts);
+}
+
+/**
+ * Same as {@link batchReadContactProperties} but for any CRM object collection
+ * (`contacts`, `companies`, …). Kept separate so the contacts signature — used
+ * by meeting protection — stays unchanged.
+ */
+export async function batchReadObjectProperties(
+  tokenProvider: TokenProvider,
+  objectPath: "contacts" | "companies",
+  ids: string[],
+  properties: string[],
+  opts?: HsCallOpts
+): Promise<Map<string, Record<string, string | null>>> {
   const out = new Map<string, Record<string, string | null>>();
   if (ids.length === 0) return out;
 
   for (let i = 0; i < ids.length; i += BATCH_READ_SIZE) {
     const batch = ids.slice(i, i + BATCH_READ_SIZE);
     const res = await hsFetch(
-      `/crm/v3/objects/contacts/batch/read`,
+      `/crm/v3/objects/${objectPath}/batch/read`,
       tokenProvider,
       {
         method: "POST",
@@ -325,6 +379,63 @@ export async function batchReadContactProperties(
   }
 
   return out;
+}
+
+/**
+ * Batch-read COMPANY records and surface each as a {@link HubspotListContact}
+ * carrying only a domain.
+ *
+ * `domain` is HubSpot's canonical company domain; `website` is the fallback for
+ * portals that filled the latter only (normalizeDomain strips scheme/www/path,
+ * so a raw "https://www.acme.org/x" reduces cleanly). A company with neither is
+ * returned with a null `email_domain` — deliberately kept rather than dropped so
+ * callers can count and report how many members were unusable, which is the
+ * difference between "the segment isn't wired up" and "the segment has no
+ * domains in it".
+ */
+async function fetchCompanyProps(
+  tokenProvider: TokenProvider,
+  ids: string[],
+  opts?: HsCallOpts
+): Promise<HubspotListContact[]> {
+  const propsById = await batchReadObjectProperties(
+    tokenProvider,
+    "companies",
+    ids,
+    ["domain", "website"],
+    opts
+  );
+
+  const out: HubspotListContact[] = [];
+  for (const [id, properties] of propsById) {
+    const raw = properties.domain || properties.website || null;
+    out.push({
+      hubspot_id: id,
+      email: null,
+      phone: null,
+      email_domain: raw ? normalizeDomain(raw) : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Full snapshot of a COMPANY list's members as domain-bearing pseudo-contacts.
+ *
+ * No incremental (`known`) path: a company member produces only a domain entry
+ * downstream, and those rows carry no per-record HubSpot id to rebuild a cache
+ * from, so every sync re-reads the membership. That is cheap in practice because
+ * the caller skips unchanged lists by `hs_list_size` before getting here.
+ */
+export async function fetchListCompanies(
+  tokenProvider: TokenProvider,
+  listId: string,
+  opts?: HsCallOpts
+): Promise<HubspotListContact[]> {
+  const rawIds = await fetchListMemberIds(tokenProvider, listId, opts);
+  const ids = [...new Set(rawIds)];
+  if (ids.length === 0) return [];
+  return fetchCompanyProps(tokenProvider, ids, opts);
 }
 
 /** Batch-read contacts to get email + phone for the given record IDs. */

@@ -3,8 +3,11 @@ import type { Client, DncSource } from "@prisma/client";
 import { dncService, normalizeEntry, NormalizedDncEntry } from "./dnc.service";
 import {
   fetchListContacts,
+  fetchListCompanies,
+  fetchListObjectType,
   fetchListSize,
   searchDncLists,
+  COMPANY_OBJECT_TYPE,
   DncLevel,
   HubspotListContact,
 } from "./hubspot-lists.service";
@@ -302,12 +305,54 @@ export async function syncHubspotSource(
     const throttle = hsThrottleFor(portalId);
     const doFullRefresh = force || fullRefreshDue;
 
-    const contacts = doFullRefresh
-      ? await fetchListContacts(tokenProvider, source.hubspot_list_id, { throttle })
-      : await fetchListContacts(tokenProvider, source.hubspot_list_id, {
-          throttle,
-          known: await buildKnownContactsMap(source.id),
-        });
+    // A DNC segment can be built on contacts OR companies. A company has no
+    // email/phone of its own, so a company list only ever yields domain-level
+    // entries — pinning one as `individual` would silently import nothing, so
+    // fail loudly instead. An unknown/unavailable object type falls back to the
+    // contact path (historical behaviour).
+    const objectTypeId = await fetchListObjectType(tokenProvider, source.hubspot_list_id, { throttle });
+    const isCompanyList = objectTypeId === COMPANY_OBJECT_TYPE;
+
+    if (isCompanyList && source.dnc_level !== "domain") {
+      const result = {
+        ...base,
+        status: "error" as const,
+        error:
+          `HubSpot list ${source.hubspot_list_id} is a COMPANY list (objectTypeId ${objectTypeId}) ` +
+          `but is pinned as dnc_level='${source.dnc_level}'. Companies carry no email/phone, so only ` +
+          `domain-level suppression is meaningful — re-pin it with dnc_level='domain'.`,
+      };
+      await recordSync(source.id, result);
+      return result;
+    }
+
+    let contacts: HubspotListContact[];
+    if (isCompanyList) {
+      contacts = await fetchListCompanies(tokenProvider, source.hubspot_list_id, { throttle });
+      const withDomain = contacts.filter((c) => c.email_domain).length;
+      if (contacts.length > 0 && withDomain === 0) {
+        // Wired correctly, but the segment itself has nothing to suppress on.
+        // Surfaced as an error so it shows up in the sync report rather than
+        // looking like a healthy zero-entry source.
+        const result = {
+          ...base,
+          status: "error" as const,
+          error:
+            `HubSpot company list ${source.hubspot_list_id} has ${contacts.length} member(s) but none has a ` +
+            `'domain' or 'website' value, so no domain-level entries can be derived. The segment needs ` +
+            `company domains populated in HubSpot.`,
+        };
+        await recordSync(source.id, result);
+        return result;
+      }
+    } else {
+      contacts = doFullRefresh
+        ? await fetchListContacts(tokenProvider, source.hubspot_list_id, { throttle })
+        : await fetchListContacts(tokenProvider, source.hubspot_list_id, {
+            throttle,
+            known: await buildKnownContactsMap(source.id),
+          });
+    }
 
     const entries = buildEntries(contacts, source);
     const domainCount = entries.filter((e) => e.domain).length;
