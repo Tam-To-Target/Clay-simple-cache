@@ -45,7 +45,12 @@ import {
   needsFullScan,
   purgeOptionsFromEnv,
   runPurge,
+  clientPbTag,
+  tagIdentifiesClient,
+  pbContactTagTitles,
+  attributeContact,
   DncSets,
+  GuardClient,
   PurgeContext,
 } from "../../src/services/phoneburner-purge.service";
 import {
@@ -883,6 +888,272 @@ describe("purgeClient — auto-mode dispatch", () => {
     const byId = Object.fromEntries(r.members.map((m) => [m.pb_member_id, m]));
     expect(byId.pb1.status).toBe("skipped_no_token");
     expect(byId.pb2.status).toBe("error");
+  });
+});
+
+// ── Attribution-aware shared-book guard ──────────────────────────────────────
+// Regression suite for the defect where ANY SDR dialing for 2+ clients silently
+// voided EVERY client's exclusion list: a contact client A explicitly suppressed
+// survived because client B (which has never heard of it) doesn't suppress it.
+// Live case: PB member 1246360440 (Michael Davids) serves pathwise + brisk-teaching.
+
+/** Client rows: brisk-teaching has a NULL pb_client_tag (brand new), pathwise doesn't. */
+const BRISK = { id: "brisk-id", external_id: "brisk-teaching", name: "Brisk Teaching", pb_client_tag: null } as any;
+const PATHWISE_ID = "pathwise-id";
+
+/** A tagged PB contact — tags live on the ORIGINAL record (`raw.tags[].title`). */
+const tagged = (id: string, email: string, tagTitles: string[]) =>
+  contact({ id, emails: [email], raw: { user_id: id, tags: tagTitles.map((title, i) => ({ id: i, title })) } });
+
+const FILLER = [
+  contact({ id: "f1", emails: ["safe1@x.com"] }),
+  contact({ id: "f2", emails: ["safe2@x.com"] }),
+  contact({ id: "f3", emails: ["safe3@x.com"] }),
+];
+
+describe("clientPbTag / tagIdentifiesClient / pbContactTagTitles / attributeContact", () => {
+  it("clientPbTag prefers pb_client_tag, else derives PascalCase from the name", () => {
+    expect(clientPbTag({ pb_client_tag: "Pathwise", name: "Pathwise Inc" } as any)).toBe("Pathwise");
+    expect(clientPbTag({ pb_client_tag: null, name: "Brisk Teaching" } as any)).toBe("BriskTeaching");
+    expect(clientPbTag({ pb_client_tag: "   ", name: "Club Hub" } as any)).toBe("ClubHub");
+    expect(clientPbTag({ pb_client_tag: null, name: "" } as any)).toBeNull();
+  });
+
+  it("matches tag titles regardless of spacing/case", () => {
+    expect(tagIdentifiesClient("Club Hub", "ClubHub")).toBe(true);
+    expect(tagIdentifiesClient("clubhub", "Club Hub")).toBe(true);
+  });
+
+  it("uses only the identity half of a '<ClientTag>: <Campaign>' tag", () => {
+    expect(tagIdentifiesClient("Awarded: Wave 1", "Awarded")).toBe(true);
+    expect(tagIdentifiesClient("Awarded: Wave 1", "Pathwise")).toBe(false);
+  });
+
+  it("tolerates a prefix on either side (>= 4 chars) — 'Brisk' vs derived 'BriskTeaching'", () => {
+    expect(tagIdentifiesClient("Brisk", "BriskTeaching")).toBe(true);
+    expect(tagIdentifiesClient("Brisk: SMB", "BriskTeaching")).toBe(true);
+    expect(tagIdentifiesClient("BriskTeaching", "Brisk")).toBe(true);
+    expect(tagIdentifiesClient("CB", "ClubHub")).toBe(false); // too short to be identity
+    expect(tagIdentifiesClient("fresh leads", "BriskTeaching")).toBe(false);
+  });
+
+  it("reads raw.tags[].title, tolerating bare strings and a missing tags array", () => {
+    expect(pbContactTagTitles(tagged("c1", "a@b.com", ["Brisk", "Brisk: SMB"]))).toEqual(["Brisk", "Brisk: SMB"]);
+    expect(pbContactTagTitles(contact({ raw: { tags: ["Awarded"] } }))).toEqual(["Awarded"]);
+    expect(pbContactTagTitles(contact({ raw: {} }))).toEqual([]);
+  });
+
+  it("attributes to a single serving client, and refuses when shared/unknown", () => {
+    const guards: GuardClient[] = [
+      { client_id: BRISK.id, tag: "BriskTeaching", sets: sets([], [], []) },
+      { client_id: PATHWISE_ID, tag: "Pathwise", sets: sets([], [], []) },
+    ];
+    expect(attributeContact(["Brisk", "Brisk: SMB"], BRISK.id, guards)).toBe("this_client");
+    expect(attributeContact(["Pathwise"], BRISK.id, guards)).toBe("other_client");
+    expect(attributeContact(["Brisk", "Pathwise"], BRISK.id, guards)).toBe("multiple");
+    expect(attributeContact([], BRISK.id, guards)).toBe("unattributed");
+    expect(attributeContact(["fresh leads"], BRISK.id, guards)).toBe("unattributed");
+    // A guard with no known tag can never claim a contact.
+    expect(attributeContact(["Pathwise"], BRISK.id, [{ client_id: PATHWISE_ID, tag: null, sets: sets([], [], []) }])).toBe(
+      "unattributed"
+    );
+  });
+});
+
+describe("purgeMember — attribution-aware shared-book guard", () => {
+  const liveOpts = { ...OPTS, dryRun: false };
+  const briskSets = sets(["excluded@school.org"], [], []);
+  const pathwiseSets = sets(["someone-else@corp.com"], [], []); // never heard of the Brisk contact
+
+  /** guards for a member that dials for BOTH brisk and pathwise. */
+  const sharedGuards = (thisTag: string | null = null): GuardClient[] => [
+    { client_id: BRISK.id, tag: thisTag, sets: briskSets },
+    { client_id: PATHWISE_ID, tag: "Pathwise", sets: pathwiseSets },
+  ];
+
+  beforeEach(() => {
+    tokenMock.mockResolvedValue("tok");
+    deleteMock.mockResolvedValue({ ok: true, status: 204, alreadyGone: false });
+  });
+
+  it("single-client member is unaffected: deletes on its own DNC, no attribution needed", async () => {
+    fetchMock.mockResolvedValue([tagged("c1", "excluded@school.org", ["Brisk"]), ...FILLER]);
+    const guards: GuardClient[] = [{ client_id: BRISK.id, tag: null, sets: briskSets }];
+    const r = await purgeMember(BRISK, MEMBER, briskSets, guards, liveOpts, "run1", counters());
+    expect(r.collisions).toBe(1);
+    expect(r.deleted).toBe(1);
+    expect(r.guard_bypassed_attributed).toBeUndefined();
+    expect(r.protected_other_client).toBeUndefined();
+  });
+
+  it("shared book: a contact tagged for the purged client IS deleted on that client's DNC alone", async () => {
+    fetchMock.mockResolvedValue([tagged("c1", "excluded@school.org", ["Brisk", "Brisk: SMB"]), ...FILLER]);
+    const r = await purgeMember(BRISK, MEMBER, briskSets, sharedGuards("BriskTeaching"), liveOpts, "run1", counters());
+    expect(r.collisions).toBe(1);
+    expect(r.deleted).toBe(1);
+    expect(r.guard_bypassed_attributed).toBe(1);
+    expect(r.protected_other_client).toBeUndefined();
+    expect(deleteMock).toHaveBeenCalledWith("c1", expect.any(Function), expect.any(Object));
+  });
+
+  it("NULL pb_client_tag: falls back to the tag derived from the client name", async () => {
+    // Guard carries no tag for the purged client -> purgeMember fills it in from
+    // the client row: pb_client_tag NULL, name "Brisk Teaching" -> "BriskTeaching".
+    fetchMock.mockResolvedValue([tagged("c1", "excluded@school.org", ["Brisk Teaching"]), ...FILLER]);
+    const r = await purgeMember(BRISK, MEMBER, briskSets, sharedGuards(null), liveOpts, "run1", counters());
+    expect(r.deleted).toBe(1);
+    expect(r.guard_bypassed_attributed).toBe(1);
+  });
+
+  it("shared book: a contact tagged for ANOTHER serving client is still protected", async () => {
+    fetchMock.mockResolvedValue([tagged("c1", "excluded@school.org", ["Pathwise", "Pathwise: Wave 2"]), ...FILLER]);
+    const r = await purgeMember(BRISK, MEMBER, briskSets, sharedGuards("BriskTeaching"), liveOpts, "run1", counters());
+    expect(r.collisions).toBe(0);
+    expect(r.deleted).toBe(0);
+    expect(r.protected_other_client).toBe(1);
+    expect(r.guard_bypassed_attributed).toBeUndefined();
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+
+  it("shared book: an UNTAGGED contact is still protected (cross-tenant safety unchanged)", async () => {
+    fetchMock.mockResolvedValue([contact({ id: "c1", emails: ["excluded@school.org"] }), ...FILLER]);
+    const r = await purgeMember(BRISK, MEMBER, briskSets, sharedGuards("BriskTeaching"), liveOpts, "run1", counters());
+    expect(r.collisions).toBe(0);
+    expect(r.protected_other_client).toBe(1);
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+
+  it("shared book: a contact tagged for BOTH serving clients is still protected (genuinely shared)", async () => {
+    fetchMock.mockResolvedValue([tagged("c1", "excluded@school.org", ["Brisk", "Pathwise"]), ...FILLER]);
+    const r = await purgeMember(BRISK, MEMBER, briskSets, sharedGuards("BriskTeaching"), liveOpts, "run1", counters());
+    expect(r.collisions).toBe(0);
+    expect(r.protected_other_client).toBe(1);
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+
+  it("attribution is irrelevant when every serving client suppresses the contact (no bypass counted)", async () => {
+    const bothSuppress = sets(["excluded@school.org"], [], []);
+    const guards: GuardClient[] = [
+      { client_id: BRISK.id, tag: "BriskTeaching", sets: briskSets },
+      { client_id: PATHWISE_ID, tag: "Pathwise", sets: bothSuppress },
+    ];
+    fetchMock.mockResolvedValue([tagged("c1", "excluded@school.org", ["Pathwise"]), ...FILLER]);
+    const r = await purgeMember(BRISK, MEMBER, briskSets, guards, liveOpts, "run1", counters());
+    expect(r.deleted).toBe(1);
+    expect(r.guard_bypassed_attributed).toBeUndefined();
+  });
+
+  it("legacy bare-DncSets guards keep unanimous consent (no identity -> no attribution)", async () => {
+    fetchMock.mockResolvedValue([tagged("c1", "excluded@school.org", ["Brisk"]), ...FILLER]);
+    const r = await purgeMember(BRISK, MEMBER, briskSets, [briskSets, pathwiseSets], liveOpts, "run1", counters());
+    expect(r.deleted).toBe(0);
+    expect(r.protected_other_client).toBe(1);
+  });
+
+  it("attribution-bypassed deletes still count toward the ratio ceiling", async () => {
+    // 2 of 3 contacts attributed + suppressed by brisk only -> ratio 0.67 > 0.3.
+    fetchMock.mockResolvedValue([
+      tagged("c1", "excluded@school.org", ["Brisk"]),
+      tagged("c2", "excluded@school.org", ["Brisk"]),
+      contact({ id: "f1", emails: ["safe@x.com"] }),
+    ]);
+    const r = await purgeMember(BRISK, MEMBER, briskSets, sharedGuards("BriskTeaching"), liveOpts, "run1", counters());
+    expect(r.status).toBe("aborted_ratio");
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("targetedPurgeMember — deferred attribution (index rows carry no tags)", () => {
+  const memberWithWatermark = (wm: Date | null) =>
+    ({ ...MEMBER, dnc_processed_through: wm, last_full_scan_at: new Date(), api_access_ok: true } as any);
+
+  function mockIndex(opts: { indexedContactIds?: string[]; emailHits?: string[]; profiles?: any[] }) {
+    mockPrisma.phoneburnerContactIndex.findMany.mockImplementation(async (args: any) => {
+      if (args.distinct) return (opts.indexedContactIds ?? []).map((id) => ({ pb_contact_id: id }));
+      if (args.where?.email) return (opts.emailHits ?? []).map((id) => ({ pb_contact_id: id }));
+      if (args.where?.pb_contact_id) return opts.profiles ?? [];
+      return [];
+    });
+  }
+
+  const liveOpts = { ...OPTS, dryRun: false, maxRatio: 0.4 };
+  const createdAt = new Date("2026-07-01T00:00:00Z");
+  const briskSets = sets(["excluded@school.org"], [], []);
+  const pathwiseSets = sets(["someone-else@corp.com"], [], []);
+
+  /** ctx for a member serving brisk + pathwise, with both PB tags known. */
+  const sharedCtx = (): PurgeContext => ({
+    ...makeCtx({ [BRISK.id]: briskSets, [PATHWISE_ID]: pathwiseSets }, { pb1: [BRISK.id, PATHWISE_ID] }),
+    getClientTag: (cid: string) => (cid === BRISK.id ? "BriskTeaching" : "Pathwise"),
+  });
+
+  beforeEach(() => {
+    tokenMock.mockResolvedValue("tok");
+    deleteMock.mockResolvedValue({ ok: true, status: 204, alreadyGone: false });
+    mockPrisma.dncEntry.findMany.mockResolvedValue([
+      { email: "excluded@school.org", phone_e164: null, domain: null, created_at: createdAt },
+    ]);
+    mockIndex({
+      indexedContactIds: ["x1", "x2", "x3", "x4", "x5"], // 1/5 = 0.2, under the gate
+      emailHits: ["c1"],
+      profiles: [{ pb_contact_id: "c1", email: "excluded@school.org", phone_e164: null, domain: null }],
+    });
+  });
+
+  it("live record tagged for the purged client: guard is bypassed and the contact is deleted", async () => {
+    fetchPbContactMock.mockResolvedValue(tagged("c1", "excluded@school.org", ["Brisk", "Brisk: SMB"]));
+    const r = await targetedPurgeMember(BRISK, memberWithWatermark(new Date("2026-01-01")), liveOpts, "run1", counters(), sharedCtx());
+    expect(r.status).toBe("ok");
+    expect(r.collisions).toBe(1);
+    expect(r.deleted).toBe(1);
+    expect(r.guard_bypassed_attributed).toBe(1);
+    expect(r.protected_other_client).toBeUndefined();
+    expect(deleteMock).toHaveBeenCalledWith("c1", expect.any(Function), expect.any(Object));
+  });
+
+  it("live record tagged for another serving client: kept, counted as protected_other_client", async () => {
+    fetchPbContactMock.mockResolvedValue(tagged("c1", "excluded@school.org", ["Pathwise"]));
+    const r = await targetedPurgeMember(BRISK, memberWithWatermark(new Date("2026-01-01")), liveOpts, "run1", counters(), sharedCtx());
+    expect(r.status).toBe("ok");
+    expect(r.collisions).toBe(0);
+    expect(r.deleted).toBe(0);
+    expect(r.protected_other_client).toBe(1);
+    expect(r.guard_bypassed_attributed).toBeUndefined();
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+
+  it("live record untagged: kept (no live-fetch-based attribution possible)", async () => {
+    fetchPbContactMock.mockResolvedValue(contact({ id: "c1", emails: ["excluded@school.org"] }));
+    const r = await targetedPurgeMember(BRISK, memberWithWatermark(new Date("2026-01-01")), liveOpts, "run1", counters(), sharedCtx());
+    expect(r.deleted).toBe(0);
+    expect(r.protected_other_client).toBe(1);
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+
+  it("no getClientTag on the context: never fetches, keeps the old unanimous-consent guard", async () => {
+    const ctx = makeCtx({ [BRISK.id]: briskSets, [PATHWISE_ID]: pathwiseSets }, { pb1: [BRISK.id, PATHWISE_ID] });
+    const noNameClient = { ...BRISK, name: "" };
+    const r = await targetedPurgeMember(noNameClient, memberWithWatermark(new Date("2026-01-01")), liveOpts, "run1", counters(), ctx);
+    expect(r.collisions).toBe(0);
+    expect(r.protected_other_client).toBe(1);
+    expect(fetchPbContactMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("purgeClient — attribution wiring through the dispatcher", () => {
+  it("passes each serving client's PB tag from ctx.getClientTag into the full-scan guard", async () => {
+    mockPrisma.phoneburnerMember.findMany.mockResolvedValue([{ ...MEMBER, last_full_scan_at: null }]);
+    tokenMock.mockResolvedValue("tok");
+    deleteMock.mockResolvedValue({ ok: true, status: 204, alreadyGone: false });
+    fetchMock.mockResolvedValue([tagged("c1", "excluded@school.org", ["Brisk"]), ...FILLER]);
+    const briskSets = sets(["excluded@school.org"], [], []);
+    const ctx: PurgeContext = {
+      ...makeCtx({ [BRISK.id]: briskSets, [PATHWISE_ID]: sets(["other@corp.com"], [], []) }, { pb1: [BRISK.id, PATHWISE_ID] }),
+      getClientTag: (cid: string) => (cid === BRISK.id ? "BriskTeaching" : "Pathwise"),
+    };
+    const r = await purgeClient(BRISK, { ...OPTS, dryRun: false, mode: "full" }, "run1", counters(), ctx);
+    expect(r.members[0].deleted).toBe(1);
+    expect(r.members[0].guard_bypassed_attributed).toBe(1);
   });
 });
 

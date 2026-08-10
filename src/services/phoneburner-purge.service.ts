@@ -18,6 +18,15 @@
  * collision ratio gate, optional per-run delete cap, shared-book guard (only
  * delete a contact when EVERY client the member dials for suppresses it).
  *
+ * Shared-book guard is ATTRIBUTION-AWARE (see `attributeContact`): unanimous
+ * consent across every serving client is required only for contacts we cannot
+ * attribute to a single client. When a contact's PhoneBurner tags identify it as
+ * *this* client's contact and no other serving client's, that client's own DNC
+ * set alone governs the delete. Without this, any SDR who dials for 2+ clients
+ * silently defeated every client's exclusion list — a contact client A had
+ * explicitly suppressed survived merely because client B (who has never heard of
+ * it) does not suppress it.
+ *
  * Ratio-ceiling override: the collision-ratio gate can be explicitly bypassed
  * for a KNOWN-heavy client (e.g. StudentBridge, which dials a deliberately
  * suppressed segment) via `PurgeOptions.overrideRatioCeiling`. It is opt-in
@@ -45,6 +54,7 @@ import {
   loadMeetingProtectedContactIds,
   meetingProtectionConfigFromEnv,
 } from "./meeting-protection.service";
+import { deriveClientTag } from "./phoneburner-upload.service";
 import { sendRatioCeilingAlert } from "./slack-alert";
 
 /** No-op protection — used whenever `PurgeContext.protectContacts` is absent
@@ -96,6 +106,14 @@ export interface MemberPurgeResult {
   failed: number;
   /** Contacts on this client's DNC but kept because another client the member serves still wants them. */
   protected_other_client?: number;
+  /**
+   * Contacts cleared for deletion on THIS client's DNC alone because their
+   * PhoneBurner tags attribute them to this client — i.e. the unanimous-consent
+   * shared-book guard would have kept them and attribution overrode it (in
+   * dry-run these are "would delete", and a ratio abort keeps the count for
+   * review). Audit counter for exactly the population the old guard leaked.
+   */
+  guard_bypassed_attributed?: number;
   /** Contacts kept because their HubSpot contact has a future/recent meeting date (see MEETING_PROTECTION_PLAN.md). */
   protected_recent_meeting?: number;
   /** Contacts fail-closed protected because the meeting-date HubSpot read failed (counted so a persistent config error is visible). */
@@ -252,6 +270,125 @@ function collideProfile(profile: ContactProfile, sets: DncSets, includeDomains: 
   return false;
 }
 
+// ── Shared-book attribution ───────────────────────────────────────────────────
+// A PhoneBurner member has ONE book, so several clients' contacts can live in it.
+// Every contact we upload is tagged with the client's PB tag (`pb_client_tag`,
+// e.g. "Awarded", "Club Hub") — see `uploadContacts`, which writes exactly the
+// tags a manual import types: "fresh leads", the client tag, and the BARE
+// campaign name (the compound "<ClientTag>: <Campaign>" form is the SAVED
+// SEARCH's name, not a contact tag, though a hand-typed tag may still use it).
+// The client tag is what lets the guard tell "this client's contact" apart from
+// "a contact shared with / owned by another client"; a campaign-name tag that
+// happens to match a second client only makes the guard fall back to unanimous
+// consent (see `attributeContact`), never delete more.
+
+/** One serving client for the shared-book guard: identity + PB tag + DNC sets. */
+export interface GuardClient {
+  client_id: string;
+  /** The client's PhoneBurner contact tag (`pb_client_tag`, else derived from the name). */
+  tag: string | null;
+  sets: DncSets;
+}
+
+/**
+ * A guard entry. Bare `DncSets` (no identity, no tag) is still accepted for
+ * callers that only know the sets — such an entry can never attribute a contact,
+ * so those callers keep the old unanimous-consent behaviour.
+ */
+export type GuardInput = DncSets | GuardClient;
+
+function isGuardClient(g: GuardInput): g is GuardClient {
+  return typeof (g as GuardClient).sets === "object" && (g as GuardClient).sets !== null;
+}
+
+export function normalizeGuards(guards: GuardInput[]): GuardClient[] {
+  return guards.map((g) => (isGuardClient(g) ? g : { client_id: "", tag: null, sets: g }));
+}
+
+/** The PB contact tag for a client: the backfilled one, else the PascalCase name
+ * fallback (`pb_client_tag` is NULL for brand-new clients). */
+export function clientPbTag(client: Pick<Client, "pb_client_tag" | "name">): string | null {
+  const explicit = client.pb_client_tag?.trim();
+  if (explicit) return explicit;
+  const name = (client.name ?? "").trim();
+  return name ? deriveClientTag(name) : null;
+}
+
+/** lowercase, alphanumerics only — "Club Hub", "club hub" and "ClubHub" all collapse. */
+function squashTag(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/** Minimum length for the prefix-tolerant match below (keeps 1-3 char noise from matching). */
+const TAG_PREFIX_MIN = 4;
+
+/**
+ * Does a PhoneBurner tag title identify this client?
+ *
+ * Matching is deliberately shape-tolerant because the same client shows up as
+ * "Awarded", "Club Hub"/"ClubHub", and "Brisk" for a client named "Brisk
+ * Teaching", plus hand-typed compound "<ClientTag>: <Campaign>" tags:
+ *   - only the part before ":" is considered (the campaign half is not identity),
+ *   - both sides are squashed (case/space/punctuation-insensitive),
+ *   - one side may be a prefix of the other when the shorter side is >= 4 chars
+ *     ("Brisk" ↔ "BriskTeaching").
+ *
+ * Over-matching is the SAFE direction: `attributeContact` only attributes when
+ * exactly ONE serving client matches, so a tag that matches two clients falls
+ * back to the conservative unanimous-consent guard rather than deleting.
+ */
+export function tagIdentifiesClient(tagTitle: string, clientTag: string): boolean {
+  const t = squashTag(tagTitle.split(":")[0]);
+  const c = squashTag(clientTag);
+  if (!t || !c) return false;
+  if (t === c) return true;
+  const [short, long] = t.length <= c.length ? [t, c] : [c, t];
+  return short.length >= TAG_PREFIX_MIN && long.startsWith(short);
+}
+
+/** Tag titles on a live PB record — `raw.tags` is `[{ id, title }]` (verified
+ * against stored `phoneburner_deletions` snapshots), tolerating bare strings. */
+export function pbContactTagTitles(contact: PbContact): string[] {
+  const tags = (contact.raw as any)?.tags;
+  if (!Array.isArray(tags)) return [];
+  const out: string[] = [];
+  for (const t of tags) {
+    const title = typeof t === "string" ? t : t?.title ?? t?.name ?? null;
+    if (title) out.push(String(title));
+  }
+  return out;
+}
+
+export type ContactAttribution =
+  /** Tagged for the client being purged and no other serving client. */
+  | "this_client"
+  /** Tagged for exactly one serving client, and it isn't the one being purged. */
+  | "other_client"
+  /** Tagged for two or more serving clients — genuinely shared. */
+  | "multiple"
+  /** No tags, or no tag matching any serving client. */
+  | "unattributed";
+
+/**
+ * Whose contact is this, among the clients this member dials for? Only
+ * "this_client" is safe to delete on one client's DNC alone; everything else
+ * keeps the conservative unanimous-consent guard.
+ */
+export function attributeContact(
+  tagTitles: string[],
+  thisClientId: string,
+  guards: GuardClient[]
+): ContactAttribution {
+  const matched = new Set<string>();
+  for (const g of guards) {
+    if (!g.client_id || !g.tag) continue; // unidentifiable guard — can't claim anything
+    if (tagTitles.some((t) => tagIdentifiesClient(t, g.tag!))) matched.add(g.client_id);
+  }
+  if (matched.size === 0) return "unattributed";
+  if (matched.size > 1) return "multiple";
+  return matched.has(thisClientId) ? "this_client" : "other_client";
+}
+
 /** Split an array into chunks of at most `size` (Postgres/Prisma `IN` lists get unwieldy past ~500-1000). */
 function chunkArray<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -350,11 +487,18 @@ async function touchMember(id: string, data: TouchMemberData): Promise<void> {
 
 /** Purge a single member's PhoneBurner book against a client's DNC sets.
  *
- * `guardSets` are the DNC sets of EVERY client this member dials for (including
- * the current one). A PhoneBurner member has ONE shared book, so a contact is
- * deleted only when it is suppressed by ALL of those clients — never when it is
- * still a live lead for another client the same member serves (no cross-tenant
- * data loss). For the common single-client member, guardSets === [sets].
+ * `guardSets` describe EVERY client this member dials for (including the current
+ * one). A PhoneBurner member has ONE shared book, so a contact that we cannot
+ * attribute to a single client is deleted only when it is suppressed by ALL of
+ * those clients — never when it may still be a live lead for another client the
+ * same member serves (no cross-tenant data loss). For the common single-client
+ * member, guardSets === [sets].
+ *
+ * When a guard entry carries identity (`GuardClient`: client_id + PB tag), the
+ * guard becomes attribution-aware: a contact whose PB tags identify it as THIS
+ * client's (and no other serving client's) is deleted on this client's DNC alone
+ * — otherwise a shared SDR silently voids every client's exclusion list. Bare
+ * `DncSets` entries carry no identity, so they keep unanimous consent.
  *
  * This is the FULL-scan path: it also rebuilds the member's identity index
  * (`phoneburner_contact_index`) as a byproduct — the only way the targeted
@@ -364,7 +508,7 @@ export async function purgeMember(
   client: Client,
   member: PhoneburnerMember,
   sets: DncSets,
-  guardSets: DncSets[],
+  guardSets: GuardInput[],
   opts: PurgeOptions,
   runId: string | null,
   counters: RunCounters,
@@ -416,30 +560,46 @@ export async function purgeMember(
   // happens next (dry-run / aborted_ratio / capped / ok all keep this data).
   await rebuildMemberIndex(member.pb_member_id, contacts);
 
+  // Guard entries, with this client's own tag filled in from its row when the
+  // caller didn't supply one (`pb_client_tag` may be NULL → derived fallback).
+  const guards = normalizeGuards(guardSets).map((g) =>
+    g.client_id === client.id && !g.tag ? { ...g, tag: clientPbTag(client) } : g
+  );
+
   const collisions: { contact: PbContact; match: Collision }[] = [];
   let protectedByOtherClient = 0;
+  let guardBypassed = 0;
   for (const c of contacts) {
     const match = collide(c, sets, opts.includeDomains);
     if (!match) continue;
-    // Shared-book safety: only delete when SUPPRESSED BY EVERY client this member
-    // dials for. If another serving client doesn't suppress it, it may be that
-    // client's live lead — leave it.
+    // Shared-book safety: a contact we cannot attribute to a single client is
+    // deleted only when SUPPRESSED BY EVERY client this member dials for — it
+    // may be another serving client's live lead.
     const suppressedByAll =
-      guardSets.length <= 1 || guardSets.every((g) => collide(c, g, opts.includeDomains) !== null);
+      guards.length <= 1 || guards.every((g) => collide(c, g.sets, opts.includeDomains) !== null);
     if (!suppressedByAll) {
-      protectedByOtherClient++;
-      continue;
+      // ...unless its PB tags attribute it to THIS client and no other serving
+      // client. Then this client's DNC alone governs — a client's own exclusion
+      // list must not be voided by an unrelated client sharing the SDR's book.
+      if (attributeContact(pbContactTagTitles(c), client.id, guards) !== "this_client") {
+        protectedByOtherClient++;
+        continue;
+      }
+      guardBypassed++;
     }
     collisions.push({ contact: c, match });
   }
   base.collisions = collisions.length;
   if (protectedByOtherClient > 0) base.protected_other_client = protectedByOtherClient;
+  if (guardBypassed > 0) base.guard_bypassed_attributed = guardBypassed;
 
   // Safety gate — a collision ratio this high signals a legitimate campaign into
   // a suppressed segment or a corrupt/over-broad DNC sync, NOT a normally dirty
   // book. Abort this member's deletes entirely; surface for review. Never purge
   // most of a book. (opts.maxRatio is clamped to HARD_MAX_RATIO upstream.)
   // `overrideRatioCeiling` bypasses this one gate for a confirmed-heavy client.
+  // Attribution-bypassed contacts count toward the numerator on purpose: they are
+  // real deletes, so an over-broad DNC still trips the ceiling on a shared book.
   const rawRatio = contacts.length > 0 ? collisions.length / contacts.length : 0;
   if (contacts.length > 0 && rawRatio > opts.maxRatio) {
     if (!opts.overrideRatioCeiling) {
@@ -641,13 +801,26 @@ export async function targetedPurgeMember(
     }
   }
 
-  // Shared-book guard, same semantics as the full-scan path: a candidate is
-  // deletable only when it collides with EVERY client this member serves.
+  // Shared-book guard, same semantics as the full-scan path: an unattributable
+  // candidate is deletable only when it collides with EVERY client this member
+  // serves. The identity index carries NO tags, so attribution cannot be decided
+  // here — guard-blocked candidates are deferred and attributed on the LIVE
+  // record in the delete loop below (which already refetches every survivor).
   const servingIds = ctx.servingClientIds(member.pb_member_id);
-  const guardSets = await Promise.all((servingIds.length ? servingIds : [client.id]).map(ctx.getSets));
+  const guards: GuardClient[] = await Promise.all(
+    (servingIds.length ? servingIds : [client.id]).map(async (cid) => ({
+      client_id: cid,
+      tag: ctx.getClientTag?.(cid) ?? (cid === client.id ? clientPbTag(client) : null),
+      sets: await ctx.getSets(cid),
+    }))
+  );
   const clientSets = await ctx.getSets(client.id);
+  // Attribution is only possible for a shared book where we know THIS client's tag.
+  const canAttribute = guards.length > 1 && Boolean(guards.find((g) => g.client_id === client.id)?.tag);
 
   const candidatesAfterGuard: string[] = [];
+  /** Guard-blocked; kept as a candidate only to attribute it on the live record. */
+  const attributionPending = new Set<string>();
   let protectedByOtherClient = 0;
   for (const contactId of candidateContactIds) {
     const profile = profiles.get(contactId);
@@ -656,10 +829,13 @@ export async function targetedPurgeMember(
     // one of the client's own added identifiers, so this should always be
     // true — guards against a data-integrity edge case rather than a normal path.
     if (!collideProfile(profile, clientSets, opts.includeDomains)) continue;
-    const suppressedByAll = guardSets.every((g) => collideProfile(profile, g, opts.includeDomains));
+    const suppressedByAll = guards.every((g) => collideProfile(profile, g.sets, opts.includeDomains));
     if (!suppressedByAll) {
-      protectedByOtherClient++;
-      continue;
+      if (!canAttribute) {
+        protectedByOtherClient++;
+        continue;
+      }
+      attributionPending.add(contactId);
     }
     candidatesAfterGuard.push(contactId);
   }
@@ -668,7 +844,9 @@ export async function targetedPurgeMember(
 
   // Ratio gate — against the TOTAL indexed book size (proxy for the member's
   // book), same intent as the full-scan gate: never let a corrupt/over-broad
-  // DNC diff nuke a large fraction of a shared book.
+  // DNC diff nuke a large fraction of a shared book. Attribution-pending
+  // candidates count toward the numerator (they may yet be deleted) — the gate
+  // stays conservative rather than under-counting a potential mass delete.
   const ratio = candidatesAfterGuard.length / Math.max(1, indexedContactCount);
   if (ratio > opts.maxRatio) {
     if (!opts.overrideRatioCeiling) {
@@ -738,6 +916,8 @@ export async function targetedPurgeMember(
   const throttle = pbThrottleFor(member.pb_member_id);
 
   let staleIndex = 0;
+  let attributionRejected = 0;
+  let guardBypassed = 0;
   for (const contactId of survivors) {
     let live: PbContact | null;
     try {
@@ -775,6 +955,18 @@ export async function targetedPurgeMember(
       // index rows from the live record instead of leaving stale identifiers.
       await refreshContactIndex(member.pb_member_id, live);
       continue;
+    }
+
+    // Deferred shared-book decision: this candidate is NOT suppressed by every
+    // serving client, so it may only be deleted if the LIVE record's PB tags
+    // attribute it to this client alone (the index has no tags — see above).
+    if (attributionPending.has(contactId)) {
+      if (attributeContact(pbContactTagTitles(live), client.id, guards) !== "this_client") {
+        protectedByOtherClient++;
+        attributionRejected++;
+        continue;
+      }
+      guardBypassed++;
     }
 
     if (opts.maxDeletesPerRun !== null && counters.deletedThisRun >= opts.maxDeletesPerRun) {
@@ -829,6 +1021,11 @@ export async function targetedPurgeMember(
   }
 
   if (staleIndex > 0) base.stale_index = staleIndex;
+  // Re-state the shared-book counters now that the deferred attribution has run:
+  // candidates rejected by attribution are kept-for-another-client, not collisions.
+  base.collisions = candidatesAfterGuard.length - attributionRejected;
+  if (protectedByOtherClient > 0) base.protected_other_client = protectedByOtherClient;
+  if (guardBypassed > 0) base.guard_bypassed_attributed = guardBypassed;
 
   // Watermark only advances on a clean LIVE completion (not dry-run, not
   // capped — access-error/aborted already returned above — and with zero
@@ -847,6 +1044,13 @@ export interface PurgeContext {
   getSets: (clientId: string) => Promise<DncSets>;
   /** Every client id a PhoneBurner member dials for (across ALL active clients). */
   servingClientIds: (pbMemberId: string) => string[];
+  /**
+   * A client's PhoneBurner contact tag (`pb_client_tag`, else derived from the
+   * name — see `clientPbTag`). Powers the attribution-aware shared-book guard;
+   * when absent (or null for a client) the guard falls back to requiring
+   * unanimous consent from every serving client.
+   */
+  getClientTag?: (clientId: string) => string | null;
   /** Meeting-protection gate (see MEETING_PROTECTION_PLAN.md). Optional — absent
    * OR the disabled feature both mean "no protection" (NOOP_PROTECT is used). */
   protectContacts?: ProtectContactsFn;
@@ -864,8 +1068,16 @@ async function purgeMemberDispatch(
 ): Promise<MemberPurgeResult> {
   const runFull = async (): Promise<MemberPurgeResult> => {
     const servingIds = ctx.servingClientIds(member.pb_member_id);
-    const guardSets = await Promise.all((servingIds.length ? servingIds : [client.id]).map(ctx.getSets));
-    return purgeMember(client, member, sets, guardSets, opts, runId, counters, ctx.protectContacts ?? NOOP_PROTECT);
+    // Guards carry identity (client id + PB tag) so purgeMember can attribute a
+    // shared book's contacts instead of demanding unanimous consent.
+    const guards: GuardClient[] = await Promise.all(
+      (servingIds.length ? servingIds : [client.id]).map(async (cid) => ({
+        client_id: cid,
+        tag: ctx.getClientTag?.(cid) ?? (cid === client.id ? clientPbTag(client) : null),
+        sets: await ctx.getSets(cid),
+      }))
+    );
+    return purgeMember(client, member, sets, guards, opts, runId, counters, ctx.protectContacts ?? NOOP_PROTECT);
   };
 
   if (opts.mode === "full") return runFull();
@@ -950,6 +1162,8 @@ export interface PurgeRunSummary {
     failed: number;
     /** Contacts on a client's DNC kept because another client the member serves still wants them. */
     protected_other_client: number;
+    /** Contacts deleted on one client's DNC alone because their PB tags attribute them to that client. */
+    guard_bypassed_attributed: number;
     /** Contacts kept because of a future/recent meeting date (see MEETING_PROTECTION_PLAN.md). */
     protected_recent_meeting: number;
     /** Contacts fail-closed protected because the meeting-date HubSpot read failed. */
@@ -983,10 +1197,14 @@ function logClientResult(c: ClientPurgeResult, dryRun: boolean): void {
   const skipped = c.members.filter((m) => SKIPPED.includes(m.status)).length;
   const protRM = c.members.reduce((n, m) => n + (m.protected_recent_meeting ?? 0), 0);
   const protReadErrors = c.members.reduce((n, m) => n + (m.protected_read_errors ?? 0), 0);
+  const protOther = c.members.reduce((n, m) => n + (m.protected_other_client ?? 0), 0);
+  const attributed = c.members.reduce((n, m) => n + (m.guard_bypassed_attributed ?? 0), 0);
   const extra = [
     `scanned ${scanned}`,
     failed ? `${failed} failed` : "",
     skipped ? `${skipped} member(s) skipped` : "",
+    protOther ? `${protOther} kept (shared-book)` : "",
+    attributed ? `${attributed} tag-attributed (own DNC governed)` : "",
     protRM ? `${protRM} meeting-protected` : "",
     protReadErrors ? `${protReadErrors} meeting-protection read error(s)` : "",
   ]
@@ -1040,6 +1258,16 @@ export async function runPurge(
     if (!arr.includes(m.client_id)) arr.push(m.client_id);
     servingMap.set(m.pb_member_id, arr);
   }
+  // PB contact tag per client (for the attribution-aware shared-book guard).
+  // Loaded for EVERY active client, not just the targeted ones — a guard needs
+  // the OTHER serving clients' tags too. `pb_client_tag` is NULL for brand-new
+  // clients, hence the derived fallback in `clientPbTag`.
+  const tagRows = await prisma.client.findMany({
+    where: { active: true },
+    select: { id: true, name: true, pb_client_tag: true },
+  });
+  const clientTags = new Map<string, string | null>(tagRows.map((c) => [c.id, clientPbTag(c)]));
+
   const setsCache = new Map<string, DncSets>();
   const meetingCfg = meetingProtectionConfigFromEnv();
   const ctx: PurgeContext = {
@@ -1048,6 +1276,7 @@ export async function runPurge(
       return setsCache.get(cid)!;
     },
     servingClientIds: (pid) => servingMap.get(pid) ?? [],
+    getClientTag: (cid) => clientTags.get(cid) ?? null,
     protectContacts: (client, candidates) => loadMeetingProtectedContactIds(client, candidates, meetingCfg),
   };
 
@@ -1099,6 +1328,7 @@ export async function runPurge(
     deleted: allMembers.reduce((n, m) => n + m.deleted, 0),
     failed: allMembers.reduce((n, m) => n + m.failed, 0),
     protected_other_client: allMembers.reduce((n, m) => n + (m.protected_other_client ?? 0), 0),
+    guard_bypassed_attributed: allMembers.reduce((n, m) => n + (m.guard_bypassed_attributed ?? 0), 0),
     protected_recent_meeting: allMembers.reduce((n, m) => n + (m.protected_recent_meeting ?? 0), 0),
     protected_read_errors: allMembers.reduce((n, m) => n + (m.protected_read_errors ?? 0), 0),
     targeted_members: allMembers.filter((m) => m.mode === "targeted").length,
@@ -1124,6 +1354,9 @@ export async function runPurge(
         [
           totals.protected_other_client
             ? `${totals.protected_other_client} contact(s) kept (shared-book, wanted by another client)`
+            : null,
+          totals.guard_bypassed_attributed
+            ? `${totals.guard_bypassed_attributed} deleted on own-DNC (tag-attributed, shared book)`
             : null,
           totals.protected_recent_meeting ? `${totals.protected_recent_meeting} kept (recent meeting)` : null,
           totals.protected_read_errors ? `${totals.protected_read_errors} read error(s)` : null,

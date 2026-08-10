@@ -260,6 +260,46 @@ pb_contact_id, email, phone_e164, domain, raw Json, synced_at`, unique on
    inactive SDRs (e.g. Nathan-style) — they 403 anyway.
 8. **Per-run cap (optional)** — `PB_PURGE_MAX_DELETES_PER_RUN` circuit breaker.
 
+### Shared-book guard is attribution-aware (not unanimous consent)
+
+One PhoneBurner member has ONE book, and an SDR can dial for several clients, so
+the book can hold more than one client's contacts. The original guard required
+**unanimous consent**: delete only when EVERY client the member serves suppresses
+the contact. That silently voided every client's exclusion list the moment an SDR
+picked up a second client — a contact client A had explicitly excluded survived
+because client B, which has never heard of it, does not suppress it (live case:
+PB member `1246360440` / Michael Davids serves `pathwise` + `brisk-teaching`; 18
+Brisk-excluded contacts, 4 of them Brisk **customers**, were being kept and
+counted as `protected_other_client`, while an SDR who dials only for Brisk
+deleted her equivalents correctly).
+
+The guard now **attributes** the contact first (`attributeContact`), using the PB
+tags every upload writes (`raw.tags[].title` — `uploadContacts` writes `fresh
+leads`, the client tag, and the BARE campaign name; the compound
+`"<ClientTag>: <Campaign>"` form is the *saved search's* name, but a hand-typed
+tag may use it, hence the `split(":")`) matched against
+`Client.pb_client_tag` (or the PascalCase name fallback, since it is NULL for
+brand-new clients):
+
+| Attribution | Governing DNC |
+|---|---|
+| tags match **only the client being purged** | that client's DNC **alone** — delete (counted in `guard_bypassed_attributed`) |
+| tags match a **different** serving client | unanimous consent (unchanged) |
+| tags match **two or more** serving clients | unanimous consent (unchanged) |
+| **no tags**, or tags match nothing | unanimous consent (unchanged) |
+
+Tag matching is case/spacing-insensitive and prefix-tolerant (≥4 chars), so
+"Club Hub" ≡ "ClubHub" and "Brisk" ≡ derived "BriskTeaching". Over-matching is the
+safe direction: attribution needs **exactly one** serving client to match, so an
+ambiguous tag falls back to the conservative guard instead of deleting.
+
+Both paths are covered. The full-scan path attributes in memory from the fetched
+record. The targeted path cannot — `phoneburner_contact_index` stores identifiers
+only, no tags — so a guard-blocked candidate is **deferred**: it stays a candidate,
+is attributed on the live record it already refetches, and is dropped there if it
+is not this client's. Attribution-eligible candidates count toward the ratio
+ceiling numerator in both paths, so an over-broad DNC still trips the gate.
+
 ### Ratio-ceiling override (single-client escape hatch)
 
 Some clients dial a **deliberately** heavily-suppressed segment, so their books

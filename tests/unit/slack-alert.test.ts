@@ -21,6 +21,7 @@ function summary(overrides: Partial<PurgeRunSummary> = {}): PurgeRunSummary {
       deleted: 26,
       failed: 0,
       protected_other_client: 0,
+      guard_bypassed_attributed: 0,
       protected_recent_meeting: 0,
       protected_read_errors: 0,
       targeted_members: 0,

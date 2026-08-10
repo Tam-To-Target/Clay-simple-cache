@@ -147,7 +147,8 @@ async function main() {
       `(${t.full_scan_members} full-scan, ${t.targeted_members} targeted), ` +
       `${t.members_skipped} skipped, ${t.contacts_scanned} scanned, ${t.collisions_found} collisions, ` +
       `${purgeOpts.dryRun ? `${t.deleted} would-delete` : `${t.deleted} deleted`}, ${t.failed} failed` +
-      `${t.protected_other_client ? `, ${t.protected_other_client} kept (shared-book)` : ""}.`
+      `${t.protected_other_client ? `, ${t.protected_other_client} kept (shared-book)` : ""}` +
+      `${t.guard_bypassed_attributed ? `, ${t.guard_bypassed_attributed} tag-attributed (own DNC governed)` : ""}.`
   );
 
   // ---- Phase 3: EmailBison suppression ----------------------------------
