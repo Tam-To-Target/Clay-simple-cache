@@ -70,7 +70,7 @@ export interface RecommendationBand {
 export interface ReasoningConfig {
   enabled: boolean;
   provider?: string; // "openai"
-  model?: string; // e.g. "gpt-5.4-mini"
+  model?: string; // e.g. "gpt-5.6-luna"
   prompt?: string;
   recommendation_bands?: RecommendationBand[];
 }

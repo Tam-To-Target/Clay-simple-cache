@@ -72,11 +72,14 @@ describe("classifySignal — guards", () => {
     if (!r.ok) expect(r.error).toMatch(/Unsupported provider/);
   });
 
-  it("requests a strict json_schema and temperature 0", async () => {
-    const fetchMock = vi.fn(async () => ({
+  const okFetch = () =>
+    vi.fn(async () => ({
       ok: true,
       json: async () => ({ choices: [{ message: { content: '{"tier":1,"reasoning":"Board funded it."}' } }] }),
     }));
+
+  it("requests a strict json_schema", async () => {
+    const fetchMock = okFetch();
     vi.stubGlobal("fetch", fetchMock as any);
 
     const r = await classifySignal(input());
@@ -84,12 +87,51 @@ describe("classifySignal — guards", () => {
     if (r.ok) expect(r.verdict).toEqual({ tier: 1, reasoning: "Board funded it." });
 
     const body = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
-    expect(body.temperature).toBe(0);
     expect(body.response_format.json_schema.strict).toBe(true);
     expect(body.response_format.json_schema.schema.properties.tier.enum).toEqual([1, 2, 3]);
     // `points` must not be requestable — the schema forbids extra keys.
     expect(body.response_format.json_schema.schema.additionalProperties).toBe(false);
     expect(Object.keys(body.response_format.json_schema.schema.properties)).toEqual(["tier", "reasoning"]);
+  });
+
+  // The tier is the model's call, so we want it stable run to run. How that is
+  // expressed is model-dependent, and sending the wrong half is a hard 400.
+  it("sends temperature 0 to a legacy model that accepts it", async () => {
+    const fetchMock = okFetch();
+    vi.stubGlobal("fetch", fetchMock as any);
+    await classifySignal({ ...input(), model: "gpt-5.4-mini" });
+    const body = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
+    expect(body.temperature).toBe(0);
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it("sends reasoning_effort instead of temperature to the gpt-5.6 family", async () => {
+    // gpt-5.6-* rejects any temperature other than 1, so sending 0 would 400
+    // every relevance score.
+    const fetchMock = okFetch();
+    vi.stubGlobal("fetch", fetchMock as any);
+    await classifySignal({ ...input(), model: "gpt-5.6-luna" });
+    const body = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
+    expect(body.temperature).toBeUndefined();
+    expect(body.reasoning_effort).toBe("none");
+  });
+
+  it("defaults to gpt-5.6-luna and tunes for it", async () => {
+    const OLD_MODEL = process.env.OPENAI_DEFAULT_MODEL;
+    delete process.env.OPENAI_DEFAULT_MODEL;
+    try {
+      const fetchMock = okFetch();
+      vi.stubGlobal("fetch", fetchMock as any);
+      const r = await classifySignal(input());
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.model).toBe("gpt-5.6-luna");
+      const body = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
+      expect(body.model).toBe("gpt-5.6-luna");
+      expect(body.temperature).toBeUndefined();
+    } finally {
+      if (OLD_MODEL === undefined) delete process.env.OPENAI_DEFAULT_MODEL;
+      else process.env.OPENAI_DEFAULT_MODEL = OLD_MODEL;
+    }
   });
 
   it("rejects a tier outside the ladder rather than clamping it", async () => {

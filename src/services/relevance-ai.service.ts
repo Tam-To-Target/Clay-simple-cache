@@ -20,9 +20,7 @@
  * score without the model, so we return an error rather than a null verdict.
  */
 import type { RelevanceVerdict, TierDefinition } from "../relevance/types";
-
-const OPENAI_BASE = () => (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
-const defaultModel = () => process.env.OPENAI_DEFAULT_MODEL || "gpt-5.4-mini";
+import { OPENAI_BASE, defaultModel, chatTuning } from "./openai-model";
 
 export interface ClassifyInput {
   businessContext: string;
@@ -117,8 +115,9 @@ export async function classifySignal(input: ClassifyInput): Promise<ClassifyOutp
       body: JSON.stringify({
         model,
         // Classification wants stability, not creativity: the same signal under
-        // the same prompt should not drift between tiers run to run.
-        temperature: 0,
+        // the same prompt should not drift between tiers run to run. How that
+        // intent is expressed depends on the model family — see chatTuning.
+        ...chatTuning(model, { temperature: 0, effort: "none" }),
         response_format: responseFormat(input.tiers),
         messages: [
           { role: "system", content: buildSystemPrompt(input) },

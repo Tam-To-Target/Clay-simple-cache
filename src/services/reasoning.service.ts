@@ -14,11 +14,7 @@
  * reasoning:null, and the caller can retry.
  */
 import type { PerCriterion, ReasoningConfig } from "../scoring/types";
-
-const OPENAI_BASE = () => (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
-// Fallback model when a client config omits `reasoning.model`. Overridable via
-// env so a model rename/deprecation is a config change, not a code deploy.
-const defaultModel = () => process.env.OPENAI_DEFAULT_MODEL || "gpt-5.4-mini";
+import { OPENAI_BASE, defaultModel, chatTuning } from "./openai-model";
 
 export interface ReasoningInput {
   reasoning: ReasoningConfig;
@@ -106,6 +102,11 @@ export async function generateReasoning(input: ReasoningInput): Promise<Reasonin
       },
       body: JSON.stringify({
         model,
+        // No temperature has ever been set here — leave it at the API default.
+        // But there is nothing to reason ABOUT: the engine already computed every
+        // number and this call only translates them to words. So on a
+        // reasoning-family model, spend no reasoning tokens.
+        ...chatTuning(model, { effort: "none" }),
         messages: buildMessages(input),
       }),
     });
