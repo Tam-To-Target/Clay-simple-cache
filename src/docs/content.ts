@@ -777,6 +777,11 @@ never does math and never decides a score or recommendation. Each client's rubri
 is a validated JSON config in our DB; a single generic engine interprets it.
 Adding a client = one validated config row, zero deploys.
 
+**The final score is capped at 100, always.** Every subscore is clamped to 0-100,
+the weighted total is clamped to 0-100, and the cap is re-applied on cache reads
+and on the HubSpot write — no config, cached row or upstream number can put a
+score above 100 into a CRM.
+
 ### POST /fit-score
 
 Score one target against a client's rubric. (\`/score\` is a temporary alias.)
@@ -786,8 +791,9 @@ Score one target against a client's rubric. (\`/score\` is a temporary alias.)
 {
   "client_id": "hilight",
   "account_name": "Burlingame Elementary School District",   // REQUIRED
-  "account_domain": "burlingame.k12.ca.us",                  // REQUIRED
+  "account_domain": "burlingame.k12.ca.us",                  // REQUIRED unless hubspot_object_id
   "starbridge_id": "SB-123456",                              // REQUIRED
+  "rubric": "cities",                 // REQUIRED only when the config has \`rubrics\`
   "values": { "total_enrollment": 8200, "propensity_to_spend": 72,
               "median_household_income": 68000, "enrollment_trend": "growing" },
   "reasoning": true,                  // optional, default true; false = skip the LLM
@@ -800,7 +806,8 @@ Score one target against a client's rubric. (\`/score\` is a temporary alias.)
 \`account_name\`, \`account_domain\`, and \`starbridge_id\` are REQUIRED identity
 properties (outside \`values\`). They are our primary HubSpot ID properties and are
 written to the record on push (mapped via config \`hubspot_push.identity_fields\`,
-default name/domain/starbridge_id).
+default name/domain/starbridge_id). \`account_domain\` is only the lookup key, so it
+may be omitted when \`hubspot_object_id\` names the record.
 
 **Response**:
 \`\`\`json
@@ -813,6 +820,7 @@ default name/domain/starbridge_id).
   ],
   "recommendation": "Prioritize now",
   "reasoning": "This large district ...",
+  "summary": "Prioritize now (score 83): strongest total_enrollment (36 pts), weakest ...",
   "cached": false,
   "pushed": false
 }
@@ -827,8 +835,28 @@ default name/domain/starbridge_id).
 - \`reasoning: false\` skips the LLM for that call (score still returned).
 - \`push_to_hubspot:true\` with \`hubspot_push\` not enabled/configured, or without
   \`hubspot_object_id\` → \`422\`.
-- Results are cached by (client_id, config_version, hash of values) so identical
-  inputs never re-bill the model.
+- Results are cached by (client_id, config_version, rubric, hash of values) so
+  identical inputs never re-bill the model.
+- \`summary\` is a deterministic one-liner built from the engine's numbers. It is
+  what gets pushed to the reasoning field when \`reasoning\` is off or failed, so a
+  push never blanks that field.
+
+**Multiple rubrics per client.** A client that scores different entity types on
+different criteria (Upciti: cities / universities / ports / DOTs) stores
+\`rubrics: { "<name>": { "criteria": [...] } }\` instead of \`criteria\`, and each
+call names one with \`rubric\`. Missing or unknown \`rubric\` → \`422\` with
+\`available_rubrics\`. Weights must sum to 1.0 within each rubric.
+
+**Points-style rubrics** (e.g. "population is worth 20 of 100 points"): set the
+criterion's \`weight\` to its share of 100 (0.20) and express each tier's points as
+a 0-100 share of that maximum (8 of 20 pts → \`score: 40\`).
+
+**Criterion options:**
+- \`missing_score\` (0-100, default 0) — grace subscore when the value is absent.
+  The criterion is still reported \`missing:true\`.
+- \`override\` on \`numeric_tiers\` — \`{ "share_key", "above", "score" }\`: when
+  \`values[share_key] / value > above\` the subscore becomes \`score\` (e.g. a
+  university whose online-only enrollment is over half its total enrollment).
 
 ### PUT /config/:client_id
 

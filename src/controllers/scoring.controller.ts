@@ -1,6 +1,13 @@
 import { Request, Response } from "express";
 import { validateConfig } from "../scoring/validator";
-import { computeScore, hashValues, findMissingRequiredKeys } from "../scoring/engine";
+import {
+  computeScore,
+  hashValues,
+  findMissingRequiredKeys,
+  resolveRubric,
+  capScore,
+  buildSummary,
+} from "../scoring/engine";
 import { isBlank } from "../scoring/criteria";
 import { scoringConfigService } from "../services/scoring-config.service";
 import { scoringCacheService } from "../services/scoring-cache.service";
@@ -50,7 +57,9 @@ export const scoringController = {
    * POST /fit-score
    * Body: {
    *   client_id, values: {...},
-   *   account_name, account_domain, starbridge_id,   // REQUIRED identity props
+   *   rubric?,                                        // REQUIRED when the config has `rubrics`
+   *   account_name, starbridge_id,                    // REQUIRED identity props
+   *   account_domain,                                 // REQUIRED unless hubspot_object_id is sent
    *   reasoning?: boolean,                            // default true; false = skip
    *   push_to_hubspot?, hubspot_object_id?, hubspot_object_type?
    * }
@@ -71,8 +80,14 @@ export const scoringController = {
 
       // Required account-identity properties (outside `values`). Missing any →
       // 422; these are our HubSpot ID properties and get pushed to the record.
+      // account_domain is only the record LOOKUP key — when the caller already
+      // names the record (hubspot_object_id) a domainless account (common for
+      // small municipalities) can still be scored and pushed.
       const identity: Record<IdentityKey, string> = {} as any;
-      const missingIdentity = REQUIRED_IDENTITY.filter((k) => isBlank(body[k]));
+      const hasObjectId = !isBlank(body.hubspot_object_id);
+      const missingIdentity = REQUIRED_IDENTITY.filter(
+        (k) => isBlank(body[k]) && !(k === "account_domain" && hasObjectId)
+      );
       if (missingIdentity.length) {
         res.status(422).json({
           error: "Missing required account identity properties",
@@ -80,11 +95,13 @@ export const scoringController = {
         });
         return;
       }
-      for (const k of REQUIRED_IDENTITY) identity[k] = String(body[k]).trim();
+      for (const k of REQUIRED_IDENTITY) identity[k] = isBlank(body[k]) ? "" : String(body[k]).trim();
       // Normalize the domain to a bare host (strip scheme/www/path/port) so it
       // matches HubSpot's stored `domain` and dedupes across URL formats
       // (e.g. "http://www.elks.net" and "https://elks.net/" → "elks.net").
-      identity.account_domain = normalizeDomain(identity.account_domain) || identity.account_domain.toLowerCase();
+      if (identity.account_domain) {
+        identity.account_domain = normalizeDomain(identity.account_domain) || identity.account_domain.toLowerCase();
+      }
 
       const stored = await scoringConfigService.get(client_id);
       if (!stored) {
@@ -93,9 +110,17 @@ export const scoringController = {
       }
       const config = stored.document;
 
+      // Multi-rubric configs need a rubric name; single-rubric configs ignore it.
+      const rubricRes = resolveRubric(config, body.rubric);
+      if (!rubricRes.ok) {
+        res.status(422).json({ error: rubricRes.error, available_rubrics: rubricRes.available });
+        return;
+      }
+      const { criteria, rubric } = rubricRes;
+
       // 422 — the caller didn't send required criterion keys AT ALL. (A key
       // that's present but null/blank is scored with missing:true instead.)
-      const missingKeys = findMissingRequiredKeys(config, values);
+      const missingKeys = findMissingRequiredKeys(criteria, values);
       if (missingKeys.length) {
         res.status(422).json({
           error: "Missing required criterion values",
@@ -104,7 +129,7 @@ export const scoringController = {
         return;
       }
 
-      const valuesHash = hashValues(values);
+      const valuesHash = hashValues(values, rubric);
       const configVersion = stored.config_version;
 
       // Reasoning is ON by default (subject to the config), but a caller can turn
@@ -142,13 +167,14 @@ export const scoringController = {
       let reasoningError: string | undefined;
 
       if (fullHit) {
-        finalScore = existing.final_score;
+        // Capped on read too: a row cached before the cap existed can't leak out.
+        finalScore = capScore(existing.final_score);
         perCriterion = existing.per_criterion;
         recommendation = existing.recommendation;
         reasoning = existing.reasoning;
       } else {
-        const engine = computeScore(config, values);
-        finalScore = engine.final_score;
+        const engine = computeScore(config, values, criteria);
+        finalScore = capScore(engine.final_score);
         perCriterion = engine.per_criterion;
         recommendation = engine.recommendation;
 
@@ -183,13 +209,18 @@ export const scoringController = {
         });
       }
 
+      // Deterministic one-liner from the engine's own numbers. It stands in for
+      // the AI narrative when reasoning is off or failed, so a push never blanks
+      // the CRM's reasoning field.
+      const summary = buildSummary(finalScore, recommendation, perCriterion);
+
       // ── Optional HubSpot push (preconditions already validated above). ─────
       let pushed = false;
       let pushError: string | undefined;
       let pushAction: "created" | "updated" | undefined;
       let pushObjectId: string | undefined;
       if (pushTarget) {
-        const result = await executePush(pushTarget, finalScore, reasoning, identity);
+        const result = await executePush(pushTarget, finalScore, reasoning ?? summary, identity);
         if (result.status === "ok") {
           pushed = true;
           pushAction = result.action;
@@ -203,10 +234,12 @@ export const scoringController = {
       res.json({
         final_score: finalScore,
         config_version: configVersion,
+        ...(rubric ? { rubric } : {}),
         account: identity,
         per_criterion: perCriterion,
         recommendation,
         reasoning,
+        summary,
         cached: fullHit,
         pushed,
         ...(pushAction ? { push_action: pushAction } : {}),
@@ -356,7 +389,8 @@ async function executePush(
   // legitimately differ (e.g. "Burlingame Elementary School District" vs the
   // CRM's "Burlingame School District").
   const scoreProps: Record<string, any> = {
-    [target.scoreField]: finalScore,
+    // The last gate before a customer's CRM: never write a score above 100.
+    [target.scoreField]: capScore(finalScore),
     [target.reasoningField]: reasoning ?? "",
   };
 
@@ -384,6 +418,9 @@ async function executePush(
       return { status: "ok", action: "updated", objectId: target.objectId };
     }
     // Otherwise resolve by domain (our dedupe key).
+    if (!target.domain) {
+      return { status: "failed", error: "No hubspot_object_id and no account_domain — cannot locate the company." };
+    }
     const ids = await searchCompanyIdsByDomain(target.portalId, target.domain);
     if (ids.length >= 1) {
       // On the rare duplicate, write to the first and let the response report it.

@@ -43,53 +43,34 @@ export function validateConfig(input: unknown): ValidationResult {
   }
   const config = input as Partial<ScoringConfigDoc>;
 
-  if (!Array.isArray(config.criteria) || config.criteria.length === 0) {
-    err("criteria", "at least one criterion is required");
-    // Without criteria the rest can't be checked meaningfully.
+  // Exactly one of `criteria` (single rubric) or `rubrics` (named rubrics).
+  const hasCriteria = config.criteria !== undefined;
+  const hasRubrics = config.rubrics !== undefined;
+  if (hasCriteria && hasRubrics) {
+    err("$", "set either `criteria` (one rubric) or `rubrics` (named rubrics), not both");
     return { valid: false, errors };
   }
-
-  // ── Per-criterion structure + uniqueness ────────────────────────────────
-  const seenKeys = new Set<string>();
-  let weightSum = 0;
-
-  config.criteria.forEach((c: any, i: number) => {
-    const at = `criteria[${i}]`;
-    if (!c || typeof c !== "object") {
-      err(at, "criterion must be an object");
-      return;
+  if (hasRubrics) {
+    if (!isObject(config.rubrics) || Object.keys(config.rubrics).length === 0) {
+      err("rubrics", "rubrics must be a non-empty object of { name: { criteria: [...] } }");
+      return { valid: false, errors };
     }
-    if (typeof c.key !== "string" || !c.key.trim()) {
-      err(`${at}.key`, "key is required and must be a non-empty string");
-    } else if (seenKeys.has(c.key)) {
-      err(`${at}.key`, `duplicate criterion key "${c.key}" (keys must be unique)`);
-    } else {
-      seenKeys.add(c.key);
+    for (const [name, r] of Object.entries(config.rubrics as Record<string, unknown>)) {
+      if (!/^[a-z0-9][a-z0-9_-]*$/.test(name)) {
+        err(`rubrics.${name}`, "rubric names must be lowercase slugs (a-z, 0-9, _ or -)");
+      }
+      if (!isObject(r)) {
+        err(`rubrics.${name}`, "each rubric must be an object { criteria: [...] }");
+        continue;
+      }
+      validateCriteriaList(r.criteria, `rubrics.${name}.criteria`, err);
     }
-
-    if (typeof c.type !== "string" || !isKnownCriterionType(c.type)) {
-      err(`${at}.type`, `unknown type "${c.type}"; supported: ${CRITERION_TYPES.join(", ")}`);
+  } else {
+    validateCriteriaList(config.criteria, "criteria", err);
+    // Without criteria the rest can't be checked meaningfully.
+    if (!Array.isArray(config.criteria) || config.criteria.length === 0) {
+      return { valid: false, errors };
     }
-
-    if (typeof c.weight !== "number" || !Number.isFinite(c.weight) || c.weight < 0) {
-      err(`${at}.weight`, "weight must be a non-negative number");
-    } else {
-      weightSum += c.weight;
-    }
-
-    if (c.labels !== undefined) validateLabels(c.labels, `${at}.labels`, err);
-
-    if (c.type === "numeric_tiers") validateTiers(c.tiers, `${at}.tiers`, err);
-    if (c.type === "categorical") validateCategorical(c, at, err);
-    if (c.type === "passthrough") validateRescale(c.rescale, `${at}.rescale`, err);
-  });
-
-  // ── Weights sum to 1.0 (surface, do not normalize) ──────────────────────
-  if (Math.abs(weightSum - 1) > WEIGHT_TOLERANCE) {
-    err(
-      "criteria",
-      `weights must sum to 1.0; got ${weightSum} (off by ${(weightSum - 1).toFixed(6)}). Fix the weights — the engine does not normalize.`
-    );
   }
 
   // ── reasoning ────────────────────────────────────────────────────────────
@@ -146,6 +127,82 @@ export function validateConfig(input: unknown): ValidationResult {
 }
 
 type Err = (path: string, message: string) => void;
+
+/** One rubric's criteria: structure, unique keys, weights summing to 1.0. */
+function validateCriteriaList(criteria: unknown, path: string, err: Err): void {
+  if (!Array.isArray(criteria) || criteria.length === 0) {
+    err(path, "at least one criterion is required");
+    return;
+  }
+  const seenKeys = new Set<string>();
+  let weightSum = 0;
+
+  criteria.forEach((c: any, i: number) => {
+    const at = `${path}[${i}]`;
+    if (!c || typeof c !== "object") {
+      err(at, "criterion must be an object");
+      return;
+    }
+    if (typeof c.key !== "string" || !c.key.trim()) {
+      err(`${at}.key`, "key is required and must be a non-empty string");
+    } else if (seenKeys.has(c.key)) {
+      err(`${at}.key`, `duplicate criterion key "${c.key}" (keys must be unique)`);
+    } else {
+      seenKeys.add(c.key);
+    }
+
+    if (typeof c.type !== "string" || !isKnownCriterionType(c.type)) {
+      err(`${at}.type`, `unknown type "${c.type}"; supported: ${CRITERION_TYPES.join(", ")}`);
+    }
+
+    if (typeof c.weight !== "number" || !Number.isFinite(c.weight) || c.weight < 0) {
+      err(`${at}.weight`, "weight must be a non-negative number");
+    } else {
+      weightSum += c.weight;
+    }
+
+    if (c.missing_score !== undefined) {
+      if (typeof c.missing_score !== "number" || !Number.isFinite(c.missing_score)) {
+        err(`${at}.missing_score`, "missing_score must be a number");
+      } else if (c.missing_score < 0 || c.missing_score > 100) {
+        err(`${at}.missing_score`, `missing_score must be within 0-100 (got ${c.missing_score})`);
+      }
+    }
+
+    if (c.labels !== undefined) validateLabels(c.labels, `${at}.labels`, err);
+
+    if (c.type === "numeric_tiers") {
+      validateTiers(c.tiers, `${at}.tiers`, err);
+      if (c.override !== undefined) validateOverride(c.override, `${at}.override`, err);
+    }
+    if (c.type === "categorical") validateCategorical(c, at, err);
+    if (c.type === "passthrough") validateRescale(c.rescale, `${at}.rescale`, err);
+  });
+
+  // Weights sum to 1.0 (surface, do not normalize).
+  if (Math.abs(weightSum - 1) > WEIGHT_TOLERANCE) {
+    err(
+      path,
+      `weights must sum to 1.0; got ${weightSum} (off by ${(weightSum - 1).toFixed(6)}). Fix the weights — the engine does not normalize.`
+    );
+  }
+}
+
+function validateOverride(o: any, path: string, err: Err): void {
+  if (!isObject(o)) {
+    err(path, "override must be an object { share_key, above, score }");
+    return;
+  }
+  if (typeof o.share_key !== "string" || !o.share_key.trim()) {
+    err(`${path}.share_key`, "share_key must be a non-empty string");
+  }
+  if (typeof o.above !== "number" || !Number.isFinite(o.above) || o.above < 0) {
+    err(`${path}.above`, "above must be a non-negative number (a share, e.g. 0.5)");
+  }
+  if (typeof o.score !== "number" || !Number.isFinite(o.score) || o.score < 0 || o.score > 100) {
+    err(`${path}.score`, "score must be within 0-100");
+  }
+}
 
 /** numeric_tiers: sorted ascending, contiguous (no gaps), no overlaps, one open top. */
 function validateTiers(tiers: unknown, path: string, err: Err): void {

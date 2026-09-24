@@ -33,11 +33,26 @@ interface CriterionBase {
   required?: boolean;
   /** Optional subscore→word bands injected into the reasoning context. */
   labels?: LabelBand[];
+  /** Optional 0-100 subscore awarded when the value is absent/blank ("grace"
+   *  points, e.g. Starbridge's "no data → 1 of 8"). Default 0. The result is
+   *  still flagged missing:true, so reasoning can say the data was absent. */
+  missing_score?: number;
+}
+
+/** Replace a numeric_tiers subscore when another input is too large a share of
+ *  this criterion's value: values[share_key] / value > above → subscore = score.
+ *  e.g. a mostly-online university: online_enrollment / total_enrollment > 0.5
+ *  → treat as having no physical campus. */
+export interface ShareOverride {
+  share_key: string;
+  above: number;
+  score: number;
 }
 
 export interface NumericTiersCriterion extends CriterionBase {
   type: "numeric_tiers";
   tiers: Tier[];
+  override?: ShareOverride;
 }
 
 export interface CategoricalCriterion extends CriterionBase {
@@ -102,10 +117,20 @@ export interface HubspotPushConfig {
   backfill_identity?: boolean;
 }
 
+/** One named rubric inside a multi-rubric config (e.g. Upciti scores cities,
+ *  universities, ports and DOTs on different criteria). */
+export interface RubricDoc {
+  criteria: Criterion[];
+}
+
 export interface ScoringConfigDoc {
   client_id: string;
   config_version?: number;
-  criteria: Criterion[];
+  /** Single-rubric configs set `criteria`. Multi-rubric configs set `rubrics`
+   *  instead, and each /fit-score call names one with `rubric`. Exactly one of
+   *  the two is present. */
+  criteria?: Criterion[];
+  rubrics?: Record<string, RubricDoc>;
   reasoning?: ReasoningConfig;
   hubspot_push?: HubspotPushConfig;
 }

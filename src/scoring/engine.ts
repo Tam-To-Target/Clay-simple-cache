@@ -7,13 +7,47 @@
  * narrative from the numbers this engine hands it.
  */
 import crypto from "crypto";
-import { evaluateCriterion } from "./criteria";
+import { evaluateCriterion, clampSubscore } from "./criteria";
 import type {
   Criterion,
   PerCriterion,
   RecommendationBand,
   ScoringConfigDoc,
 } from "./types";
+
+/** The ceiling every fit score lives under. Enforced here AND at every exit
+ *  (response, cache read, HubSpot push) — see capScore. */
+export const MAX_SCORE = 100;
+
+/** Clamp a final score to an integer in [0, MAX_SCORE]. Non-finite → 0. Applied
+ *  to every score we return or write, including ones read back from the cache,
+ *  so no config, cached row or future bug can ever emit a score above 100. */
+export function capScore(n: unknown): number {
+  const v = typeof n === "number" ? n : Number(n);
+  return Number.isFinite(v) ? Math.max(0, Math.min(MAX_SCORE, Math.round(v))) : 0;
+}
+
+export type RubricResolution =
+  | { ok: true; criteria: Criterion[]; rubric: string | null }
+  | { ok: false; error: string; available?: string[] };
+
+/**
+ * Pick the criteria list a call scores against. Single-rubric configs ignore
+ * `rubric` (null). Multi-rubric configs REQUIRE a known rubric name — a silent
+ * fallback would score a university on the city rubric.
+ */
+export function resolveRubric(config: ScoringConfigDoc, rubric: unknown): RubricResolution {
+  if (config.rubrics && Object.keys(config.rubrics).length) {
+    const available = Object.keys(config.rubrics);
+    if (typeof rubric !== "string" || !rubric.trim()) {
+      return { ok: false, error: "This client has multiple rubrics — pass `rubric`.", available };
+    }
+    const r = config.rubrics[rubric.trim()];
+    if (!r) return { ok: false, error: `Unknown rubric "${rubric}".`, available };
+    return { ok: true, criteria: r.criteria, rubric: rubric.trim() };
+  }
+  return { ok: true, criteria: config.criteria || [], rubric: null };
+}
 
 /** A criterion is required unless it explicitly opts out with required:false. */
 export function isRequired(c: Criterion): boolean {
@@ -26,10 +60,13 @@ export function isRequired(c: Criterion): boolean {
  * (→ scored with missing:true, "don't penalize fit"). See the build spec.
  */
 export function findMissingRequiredKeys(
-  config: ScoringConfigDoc,
+  configOrCriteria: ScoringConfigDoc | Criterion[],
   values: Record<string, unknown>
 ): string[] {
-  return config.criteria
+  const criteria = Array.isArray(configOrCriteria)
+    ? configOrCriteria
+    : configOrCriteria.criteria || [];
+  return criteria
     .filter((c) => isRequired(c) && !(c.key in values))
     .map((c) => c.key);
 }
@@ -67,32 +104,63 @@ export interface EngineResult {
  */
 export function computeScore(
   config: ScoringConfigDoc,
-  values: Record<string, unknown>
+  values: Record<string, unknown>,
+  criteria: Criterion[] = config.criteria || []
 ): EngineResult {
   const per_criterion: PerCriterion[] = [];
   let weighted = 0;
 
-  for (const c of config.criteria) {
+  for (const c of criteria) {
     const value = c.key in values ? values[c.key] : undefined;
-    const { subscore, missing } = evaluateCriterion(value, c);
-    weighted += subscore * c.weight;
+    const { subscore, missing } = evaluateCriterion(value, c, values);
+    const weight = Number.isFinite(c.weight) && c.weight > 0 ? c.weight : 0;
+    weighted += clampSubscore(subscore) * weight;
     per_criterion.push({
       key: c.key,
       value: value ?? null,
       subscore,
-      weight: c.weight,
+      weight,
       missing,
       label: resolveLabel(c, subscore),
     });
   }
 
-  const final_score = Math.max(0, Math.min(100, Math.round(weighted)));
+  const final_score = capScore(weighted);
   const recommendation = resolveRecommendation(
     config.reasoning?.recommendation_bands,
     final_score
   );
 
   return { final_score, per_criterion, recommendation };
+}
+
+/** One criterion's contribution in points (subscore × weight). */
+function points(c: PerCriterion): number {
+  return Math.round(c.subscore * c.weight * 100) / 100;
+}
+
+/**
+ * A deterministic one-line summary, built from the engine's numbers only. Used
+ * as the narrative when AI reasoning is off or failed, so a push never blanks
+ * the reasoning field and every number in the text is the engine's own.
+ *   "High Fit (score 70): strongest population (20 pts), weakest procurement
+ *    (2 pts); 2 of 8 inputs missing."
+ */
+export function buildSummary(
+  finalScore: number,
+  recommendation: string | null,
+  perCriterion: PerCriterion[]
+): string {
+  const head = `${recommendation ?? "Fit"} (score ${capScore(finalScore)})`;
+  const scored = perCriterion.filter((c) => c.weight > 0);
+  if (!scored.length) return head + ".";
+  const byShare = [...scored].sort((a, b) => a.subscore - b.subscore);
+  const weakest = byShare[0];
+  const strongest = byShare[byShare.length - 1];
+  const missing = scored.filter((c) => c.missing).length;
+  let out = `${head}: strongest ${strongest.key} (${points(strongest)} pts), weakest ${weakest.key} (${points(weakest)} pts)`;
+  if (missing) out += `; ${missing} of ${scored.length} inputs missing`;
+  return out + ".";
 }
 
 /**
@@ -119,6 +187,9 @@ function canonicalize(value: unknown): unknown {
  * equivalent inputs — including reordered nested objects — collapse to one
  * cache entry and never re-bill the reasoning model.
  */
-export function hashValues(values: Record<string, unknown>): string {
-  return crypto.createHash("sha256").update(JSON.stringify(canonicalize(values))).digest("hex");
+export function hashValues(values: Record<string, unknown>, rubric: string | null = null): string {
+  // The rubric is part of the key — identical inputs scored on two rubrics are
+  // two results. Single-rubric calls hash exactly as before (cache stays warm).
+  const input = rubric ? { __rubric: rubric, values } : values;
+  return crypto.createHash("sha256").update(JSON.stringify(canonicalize(input))).digest("hex");
 }
