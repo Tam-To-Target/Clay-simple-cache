@@ -958,7 +958,8 @@ fields. Each maps to a HubSpot property, overridable per client via
 | \`filter_type\` | \`sb_filter_type\` | \`bridge.filterType\` |
 | \`buyer_id\` / \`buyer_name\` / \`buyer_state\` | \`sb_buyer_id\` / \`sb_buyer_name\` / \`sb_buyer_state\` | \`row.buyerId\`, \`buyer:name\`, \`buyer:stateName\` |
 | \`added_date\` | \`sb_added_date\` | \`op:added_date\` |
-| \`created_at\` / \`updated_at\` | \`sb_row_created_at\` / \`sb_row_updated_at\` | \`row.createdAt\` / \`row.updatedAt\` |
+| \`created_at\` | \`sb_row_created_at\` | event date: \`signal:occurred_at\` → \`op:posted_date\` → \`op:start_date\` → \`row.createdAt\` |
+| \`updated_at\` | \`sb_row_updated_at\` | \`row.updatedAt\` |
 | \`signal_status\` | \`sb_signal_status\` | \`common:status\` |
 | \`synced_at\` | \`sb_synced_at\` | set by the API at push time |
 | \`contact_*\` (first/last/title/email/phone) | \`sb_contact_*\` | contact columns, or \`op_template:web_contact\` |

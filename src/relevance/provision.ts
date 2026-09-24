@@ -136,7 +136,7 @@ const SPECS: Record<string, Spec> = {
   },
   created_at: {
     label: "Signal Created At",
-    description: "row.createdAt — the only date present on every signal type.",
+    description: "When the event happened: signal:occurred_at, else op:posted_date, else op:start_date, else row.createdAt. Drives relevance decay.",
     type: "datetime",
     fieldType: "date",
   },

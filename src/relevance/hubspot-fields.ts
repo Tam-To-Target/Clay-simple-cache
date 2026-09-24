@@ -75,6 +75,29 @@ export function toHubspotDateTime(v: unknown): string | null {
   return `${m[1]}T${m[2]}.${ms}Z`;
 }
 
+/**
+ * Starbridge columns that carry when the underlying event actually happened,
+ * in priority order. Keys are normalized (`op:*`/`signal:*` have no UUID prefix,
+ * so they arrive as-is). Signal bridges → occurred_at; Meeting/RFP → posted_date;
+ * Purchase → contract start_date.
+ */
+const EVENT_DATE_KEYS = ["signal:occurred_at", "op:posted_date", "op:start_date"];
+
+/**
+ * The date written to `created_at`. `row.createdAt` / `op:added_date` are when
+ * Starbridge added the row to the bridge — a first pull stamps every row with
+ * the same day, which makes them useless for decay. Prefer the event's own
+ * date and fall back to `row.createdAt` for types that have none (Buyer,
+ * Contact, JobChange) or when the cell is blank.
+ */
+export function eventDate(signal: ParsedSignal): string | null {
+  for (const key of EVENT_DATE_KEYS) {
+    const d = toHubspotDateTime(signal.columns[key]);
+    if (d) return d;
+  }
+  return toHubspotDateTime(signal.createdAt);
+}
+
 function str(v: unknown): string | null {
   if (v === null || v === undefined) return null;
   if (typeof v === "object") return null;
@@ -121,7 +144,7 @@ export function extractSignalFields(
     buyer_name: str(signal.buyerName),
     buyer_state: str(signal.buyerState),
     added_date: toHubspotDateTime(signal.columns["op:added_date"]),
-    created_at: toHubspotDateTime(signal.createdAt),
+    created_at: eventDate(signal),
     updated_at: toHubspotDateTime(signal.updatedAt),
     signal_status: status,
     synced_at: toHubspotDateTime(syncedAt),

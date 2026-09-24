@@ -106,6 +106,24 @@ describe("extractSignalFields", () => {
     expect(f.synced_at).toBe(SYNCED);
   });
 
+  it("uses the event's own date for created_at, not the bridge-add date", () => {
+    const withDate = (key: string, value: string) => {
+      const r = parseSignal({
+        bridge: { bridgeId: "b-1", filterType: "Signal", columns: [{ name: "When", key }] },
+        row: { rowId: "r", createdAt: "2026-08-18T07:10:11.449Z", columns: { When: { value } } },
+      });
+      if (!r.ok) throw new Error("parse failed");
+      return extractSignalFields(r.signal, SYNCED).created_at;
+    };
+    expect(withDate("signal:occurred_at", "2025-09-15T00:00:00Z")).toBe("2025-09-15T00:00:00.000Z");
+    expect(withDate("op:posted_date", "2026-05-12")).toBe("2026-05-12");
+    expect(withDate("op:start_date", "2025-10-01")).toBe("2025-10-01");
+  });
+
+  it("falls back to row.createdAt when there is no event date", () => {
+    expect(fieldsOf().created_at).toBe("2026-07-27T04:38:58.148Z");
+  });
+
   it("leaves absent fields null so they are never written as blank", () => {
     const f = fieldsOf();
     expect(f.contact_phone).toBeNull();
