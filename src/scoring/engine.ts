@@ -154,11 +154,13 @@ export function buildSummary(
   const head = `${recommendation ?? "Fit"} (score ${capScore(finalScore)})`;
   const scored = perCriterion.filter((c) => c.weight > 0);
   if (!scored.length) return head + ".";
-  const byShare = [...scored].sort((a, b) => a.subscore - b.subscore);
-  const weakest = byShare[0];
-  const strongest = byShare[byShare.length - 1];
+  // Ranked by points contributed (what a reader adds up), ties by share of max.
+  const ranked = [...scored].sort((a, b) => points(a) - points(b) || a.subscore - b.subscore);
+  const weakest = ranked[0];
+  const strongest = ranked[ranked.length - 1];
   const missing = scored.filter((c) => c.missing).length;
-  let out = `${head}: strongest ${strongest.key} (${points(strongest)} pts), weakest ${weakest.key} (${points(weakest)} pts)`;
+  const pts = (c: PerCriterion) => `${points(c)} ${points(c) === 1 ? "pt" : "pts"}`;
+  let out = `${head}: strongest ${strongest.key} (${pts(strongest)}), weakest ${weakest.key} (${pts(weakest)})`;
   if (missing) out += `; ${missing} of ${scored.length} inputs missing`;
   return out + ".";
 }
