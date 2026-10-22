@@ -13,9 +13,9 @@ afterEach(() => {
 });
 
 describe("defaultModel", () => {
-  it("is gpt-5.6-luna", () => {
+  it("is gpt-6-luna", () => {
     delete process.env.OPENAI_DEFAULT_MODEL;
-    expect(defaultModel()).toBe("gpt-5.6-luna");
+    expect(defaultModel()).toBe("gpt-6-luna");
   });
 
   it("is overridable by env so a rename is not a deploy", () => {

@@ -116,7 +116,7 @@ describe("classifySignal — guards", () => {
     expect(body.reasoning_effort).toBe("none");
   });
 
-  it("defaults to gpt-5.6-luna and tunes for it", async () => {
+  it("defaults to gpt-6-luna and tunes for it", async () => {
     const OLD_MODEL = process.env.OPENAI_DEFAULT_MODEL;
     delete process.env.OPENAI_DEFAULT_MODEL;
     try {
@@ -124,9 +124,9 @@ describe("classifySignal — guards", () => {
       vi.stubGlobal("fetch", fetchMock as any);
       const r = await classifySignal(input());
       expect(r.ok).toBe(true);
-      if (r.ok) expect(r.model).toBe("gpt-5.6-luna");
+      if (r.ok) expect(r.model).toBe("gpt-6-luna");
       const body = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
-      expect(body.model).toBe("gpt-5.6-luna");
+      expect(body.model).toBe("gpt-6-luna");
       expect(body.temperature).toBeUndefined();
     } finally {
       if (OLD_MODEL === undefined) delete process.env.OPENAI_DEFAULT_MODEL;

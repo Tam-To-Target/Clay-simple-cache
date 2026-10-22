@@ -23,12 +23,11 @@ export const OPENAI_BASE = () =>
  * Fallback model when a client config omits an explicit model. Overridable via
  * env so a model rename/deprecation is a config change, not a code deploy.
  *
- * gpt-5.6-luna is the cost pick for both callers: 3.75x cheaper than
- * gpt-5.4-mini on input, output AND cached input ($0.20/$1.20/$0.02 per M vs
- * $0.75/$4.50/$0.075), and positioned for exactly this workload — high-volume
- * classification with structured output.
+ * gpt-6-luna is the default for both callers (moved from gpt-5.6-luna, which
+ * was itself the cost pick over gpt-5.4-mini). Like the 5.6 family it takes
+ * `reasoning_effort` and rejects `temperature` — see REASONING_FAMILIES.
  */
-export const defaultModel = () => process.env.OPENAI_DEFAULT_MODEL || "gpt-5.6-luna";
+export const defaultModel = () => process.env.OPENAI_DEFAULT_MODEL || "gpt-6-luna";
 
 /**
  * Model families that reject `temperature` and accept `reasoning_effort`.

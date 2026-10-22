@@ -1,6 +1,65 @@
 # Security & Compliance Plan — TTT-api-service
 
-**Status:** planned (not built) · **Date:** 2026-08-05 · **Owner:** Javier
+**Status: ⛔ SUPERSEDED 2026-08-14 — this service is being sunsetted. Do not build from this plan.**
+**Date:** 2026-08-05 · **Owner:** Javier
+
+> ## ⛔ 2026-08-14 — this plan is retired. DNC moves to GTMOS.
+>
+> **Decision: `TTT-api-service` is being sunsetted and its DNC/suppression responsibility moves into
+> GTMOS**, which becomes TTT's single compliance system of record.
+>
+> **Do not implement §2, §3, §4 or §6 of this document.** They exist to retrofit per-user
+> authentication, an access log, named service principals and tenant isolation onto this service —
+> and GTMOS already has all four. The GTMOS DNC implementation is built (migration `0040`, spec
+> [`gtmos/docs/implemented/36-dnc-in-gtmos.md`](../gtmos/docs/implemented/36-dnc-in-gtmos.md), all
+> five slices complete 2026-08-11) and ships behind `DNC_SYNC_ENABLED` / `DNC_DETECTOR_ENABLED`.
+> Suppression data lands inside GTMOS's per-user token auth, revocation-aware access scoping and
+> `audit_log` **by inheritance**, which is precisely what this plan was going to spend weeks
+> building here.
+>
+> **What still needs doing lives elsewhere:** the cutover itself (doc 41's one-time data copy, the
+> flag flips, verification, decommission) is tracked as **R-42** in
+> `Compliance/Engineering Remediation Plan.md`. **§5.1's ingest minimisation is the one item worth
+> carrying forward** — it should be fixed in the GTMOS implementation rather than here (**R-04**).
+>
+> **Why this document is kept rather than deleted:** its §1 "current state" table is an accurate
+> record of the gaps that motivated the migration, and the DPA's history refers to it. Read it as
+> history, not as a backlog.
+>
+> ---
+>
+> <details>
+> <summary>Superseded status note from 2026-08-13, retained for history</summary>
+>
+> ## ⚠️ 2026-08-13: this plan is now the critical path for the entire DPA
+>
+> Re-verified against the code today. **Nothing in this document has been implemented.**
+> `src/middleware/auth.middleware.ts` is still one shared static `API_KEY` on every DNC route; there
+> is still no access log; `DncEntry.data` still persists raw source rows; and the identity cache
+> (`profiles` — **13,919 rows**, counted in production today) is still pooled across every tenant
+> with no client predicate.
+>
+> In the same period **GTMOS built its entire half**: per-client compliance columns are live in
+> production (migration `0042`), AI call-site gating merged 2026-08-12, evidence surfaces merged
+> 2026-08-13.
+>
+> **The consequence for the DPA is specific and awkward.** Clause 9 (individual attribution and
+> access logging) is now true of the activity-tracking platform and false of *this* service — the one
+> that actually holds the client's Do-Not-Contact list. When a client's legal reviewer asks "who at
+> TTT accessed our suppression data, and when," the answer still does not exist. Clause 4/6 has the
+> same shape: cross-client isolation is enforced in GTMOS and ignored here, so **Isolated cannot
+> honestly be offered to a signing client until §6.1 ships**.
+>
+> §2, §3 and §4 of this plan are the highest-value work remaining anywhere in the compliance program.
+> They are also mostly *wiring* — `requireIdentity` and `canAccessSlug` already exist and are already
+> used by one route.
+>
+> </details>
+>
+> *(2026-08-14: the note above was written the day before the sunset decision. Its diagnosis was
+> correct; its conclusion — build §2–§4 here — was overtaken. The gap closes by migrating the data
+> into a system that already has those controls, rather than by adding them to a system being
+> switched off.)*
 **Driver:** an education-sector client's legal review rejected two vendors on *data-use* grounds.
 TTT's answer is a bespoke DPA rather than SOC 2 — but the DPA is only signable if the software backs
 each clause. This service holds the client-provided suppression data, so it carries most of the
