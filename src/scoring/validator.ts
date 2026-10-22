@@ -64,6 +64,9 @@ export function validateConfig(input: unknown): ValidationResult {
         continue;
       }
       validateCriteriaList(r.criteria, `rubrics.${name}.criteria`, err);
+      if (r.account_type !== undefined && (typeof r.account_type !== "string" || !r.account_type.trim())) {
+        err(`rubrics.${name}.account_type`, "account_type must be a non-empty string when set");
+      }
     }
   } else {
     validateCriteriaList(config.criteria, "criteria", err);

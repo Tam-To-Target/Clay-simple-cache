@@ -43,7 +43,7 @@ const MULTI: ScoringConfigDoc = {
   client_id: "acme",
   rubrics: {
     cities: { criteria: [POP, SPEND] },
-    ports: { criteria: [{ ...SPEND, weight: 1 }] },
+    ports: { criteria: [{ ...SPEND, weight: 1 }], account_type: "port authority" },
   },
   reasoning: {
     enabled: false,
@@ -130,6 +130,12 @@ describe("resolveRubric", () => {
   it("selects the named rubric", () => {
     const r = resolveRubric(MULTI, "ports");
     expect(r.ok && r.criteria.length).toBe(1);
+  });
+  it("carries the rubric's account_type, falling back to the rubric name", () => {
+    const ports = resolveRubric(MULTI, "ports");
+    expect(ports.ok && ports.accountType).toBe("port authority");
+    const cities = resolveRubric(MULTI, "cities");
+    expect(cities.ok && cities.accountType).toBe("cities");
   });
   it("ignores rubric on single-rubric configs", () => {
     const single = { client_id: "s", criteria: [{ ...SPEND, weight: 1 }] } as ScoringConfigDoc;

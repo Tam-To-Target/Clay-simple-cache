@@ -21,6 +21,10 @@ export interface ReasoningInput {
   finalScore: number;
   recommendation: string | null;
   perCriterion: PerCriterion[];
+  /** What kind of account this is (rubric's account_type, else its name). Not
+   *  the account's NAME: cached reasoning is keyed by values + rubric, so two
+   *  accounts with identical inputs share one narrative. */
+  accountType?: string | null;
 }
 
 export interface ReasoningOutput {
@@ -52,6 +56,7 @@ export function buildContextBlock(input: ReasoningInput): string {
       note:
         "All scores are ALREADY computed. Do NOT do math, do NOT output numbers. " +
         "Translate each metric to words per your instructions. End with the recommendation verbatim.",
+      ...(input.accountType ? { account_type: input.accountType } : {}),
       metrics,
       recommendation: input.recommendation,
     },

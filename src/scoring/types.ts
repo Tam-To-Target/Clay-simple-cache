@@ -121,6 +121,10 @@ export interface HubspotPushConfig {
  *  universities, ports and DOTs on different criteria). */
 export interface RubricDoc {
   criteria: Criterion[];
+  /** What kind of account this rubric scores, in words (e.g. "state department
+   *  of transportation"). Passed to reasoning so the narrative doesn't call a
+   *  DOT a city. Defaults to the rubric name. */
+  account_type?: string;
 }
 
 export interface ScoringConfigDoc {

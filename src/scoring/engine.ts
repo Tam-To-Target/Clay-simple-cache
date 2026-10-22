@@ -28,7 +28,7 @@ export function capScore(n: unknown): number {
 }
 
 export type RubricResolution =
-  | { ok: true; criteria: Criterion[]; rubric: string | null }
+  | { ok: true; criteria: Criterion[]; rubric: string | null; accountType: string | null }
   | { ok: false; error: string; available?: string[] };
 
 /**
@@ -44,9 +44,10 @@ export function resolveRubric(config: ScoringConfigDoc, rubric: unknown): Rubric
     }
     const r = config.rubrics[rubric.trim()];
     if (!r) return { ok: false, error: `Unknown rubric "${rubric}".`, available };
-    return { ok: true, criteria: r.criteria, rubric: rubric.trim() };
+    const name = rubric.trim();
+    return { ok: true, criteria: r.criteria, rubric: name, accountType: r.account_type?.trim() || name };
   }
-  return { ok: true, criteria: config.criteria || [], rubric: null };
+  return { ok: true, criteria: config.criteria || [], rubric: null, accountType: null };
 }
 
 /** A criterion is required unless it explicitly opts out with required:false. */

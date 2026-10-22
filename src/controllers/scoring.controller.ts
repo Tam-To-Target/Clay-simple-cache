@@ -116,7 +116,7 @@ export const scoringController = {
         res.status(422).json({ error: rubricRes.error, available_rubrics: rubricRes.available });
         return;
       }
-      const { criteria, rubric } = rubricRes;
+      const { criteria, rubric, accountType } = rubricRes;
 
       // 422 — the caller didn't send required criterion keys AT ALL. (A key
       // that's present but null/blank is scored with missing:true instead.)
@@ -184,6 +184,7 @@ export const scoringController = {
             finalScore,
             recommendation,
             perCriterion,
+            accountType,
           });
           reasoning = r.reasoning;
           reasoningError = r.error;
