@@ -130,7 +130,9 @@ export async function generateReasoning(input: ReasoningInput): Promise<Reasonin
     const json = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
-    const text = json.choices?.[0]?.message?.content?.trim();
+    // One paragraph: the CRM card collapses newlines anyway, and stray line
+    // breaks before the closing recommendation read as formatting noise.
+    const text = json.choices?.[0]?.message?.content?.replace(/\s+/g, " ").trim();
     if (!text) return { reasoning: null, error: "OpenAI returned no content" };
     return { reasoning: text };
   } catch (e) {
