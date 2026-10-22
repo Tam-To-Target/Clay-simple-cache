@@ -61,6 +61,7 @@ export const scoringController = {
    *   account_name, starbridge_id,                    // REQUIRED identity props
    *   account_domain,                                 // REQUIRED unless hubspot_object_id is sent
    *   reasoning?: boolean,                            // default true; false = skip
+   *   require_reasoning?: boolean,                    // push only if the narrative was written
    *   push_to_hubspot?, hubspot_object_id?, hubspot_object_type?
    * }
    */
@@ -129,7 +130,10 @@ export const scoringController = {
         return;
       }
 
-      const valuesHash = hashValues(values, rubric);
+      // Only a narrative that names the account is account-specific; otherwise
+      // identical inputs share one cached result, as before.
+      const accountName = config.reasoning?.include_account_name ? identity.account_name || null : null;
+      const valuesHash = hashValues(values, rubric, accountName);
       const configVersion = stored.config_version;
 
       // Reasoning is ON by default (subject to the config), but a caller can turn
@@ -185,6 +189,10 @@ export const scoringController = {
             recommendation,
             perCriterion,
             accountType,
+            accountName,
+            descriptions: Object.fromEntries(
+              criteria.filter((c) => c.description?.trim()).map((c) => [c.key, c.description!.trim()])
+            ),
           });
           reasoning = r.reasoning;
           reasoningError = r.error;
@@ -220,7 +228,13 @@ export const scoringController = {
       let pushError: string | undefined;
       let pushAction: "created" | "updated" | undefined;
       let pushObjectId: string | undefined;
-      if (pushTarget) {
+      // { require_reasoning: true } — a caller re-writing narratives must not
+      // overwrite the CRM field with the numbers-only summary when the model
+      // failed; skip the push instead so a re-run retries it.
+      const requireReasoning = body.require_reasoning === true || body.require_reasoning === "true";
+      if (pushTarget && requireReasoning && !reasoning) {
+        pushError = `reasoning unavailable${reasoningError ? ` (${reasoningError})` : ""}; push skipped (require_reasoning)`;
+      } else if (pushTarget) {
         const result = await executePush(pushTarget, finalScore, reasoning ?? summary, identity);
         if (result.status === "ok") {
           pushed = true;

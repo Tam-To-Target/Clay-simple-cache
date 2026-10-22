@@ -173,6 +173,9 @@ function validateCriteriaList(criteria: unknown, path: string, err: Err): void {
     }
 
     if (c.labels !== undefined) validateLabels(c.labels, `${at}.labels`, err);
+    if (c.description !== undefined && (typeof c.description !== "string" || !c.description.trim())) {
+      err(`${at}.description`, "description must be a non-empty string when set");
+    }
 
     if (c.type === "numeric_tiers") {
       validateTiers(c.tiers, `${at}.tiers`, err);

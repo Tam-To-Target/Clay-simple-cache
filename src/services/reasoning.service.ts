@@ -25,6 +25,10 @@ export interface ReasoningInput {
    *  the account's NAME: cached reasoning is keyed by values + rubric, so two
    *  accounts with identical inputs share one narrative. */
   accountType?: string | null;
+  /** The account's name; set only when the config opts in (include_account_name). */
+  accountName?: string | null;
+  /** criterion key → plain-English description from the config. */
+  descriptions?: Record<string, string>;
 }
 
 export interface ReasoningOutput {
@@ -43,6 +47,7 @@ export interface ReasoningOutput {
 export function buildContextBlock(input: ReasoningInput): string {
   const metrics = input.perCriterion.map((c) => ({
     metric: c.key,
+    ...(input.descriptions?.[c.key] ? { means: input.descriptions[c.key] } : {}),
     value: c.value,
     // subscore/weight are context for HOW STRONG each signal is; the prompt maps
     // these to words. They are NOT to be echoed as numbers.
@@ -56,6 +61,7 @@ export function buildContextBlock(input: ReasoningInput): string {
       note:
         "All scores are ALREADY computed. Do NOT do math, do NOT output numbers. " +
         "Translate each metric to words per your instructions. End with the recommendation verbatim.",
+      ...(input.accountName ? { account_name: input.accountName } : {}),
       ...(input.accountType ? { account_type: input.accountType } : {}),
       metrics,
       recommendation: input.recommendation,

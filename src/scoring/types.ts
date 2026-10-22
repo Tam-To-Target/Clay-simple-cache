@@ -37,6 +37,9 @@ interface CriterionBase {
    *  points, e.g. Starbridge's "no data → 1 of 8"). Default 0. The result is
    *  still flagged missing:true, so reasoning can say the data was absent. */
   missing_score?: number;
+  /** Plain-English meaning of this input for the reasoning model (what it
+   *  measures, which direction is good). Text only; never affects the score. */
+  description?: string;
 }
 
 /** Replace a numeric_tiers subscore when another input is too large a share of
@@ -88,6 +91,10 @@ export interface ReasoningConfig {
   model?: string; // e.g. "gpt-5.6-luna"
   prompt?: string;
   recommendation_bands?: RecommendationBand[];
+  /** Give the model the account's name so the write-up can use it. Also makes
+   *  the result cache per-account (name joins the cache key), since a narrative
+   *  that names one account must never be reused for another. */
+  include_account_name?: boolean;
 }
 
 /**

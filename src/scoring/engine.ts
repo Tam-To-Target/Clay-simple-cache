@@ -190,9 +190,17 @@ function canonicalize(value: unknown): unknown {
  * equivalent inputs — including reordered nested objects — collapse to one
  * cache entry and never re-bill the reasoning model.
  */
-export function hashValues(values: Record<string, unknown>, rubric: string | null = null): string {
+export function hashValues(
+  values: Record<string, unknown>,
+  rubric: string | null = null,
+  account: string | null = null
+): string {
   // The rubric is part of the key — identical inputs scored on two rubrics are
   // two results. Single-rubric calls hash exactly as before (cache stays warm).
-  const input = rubric ? { __rubric: rubric, values } : values;
+  // `account` is set only when reasoning names the account, so a narrative that
+  // mentions one account is never served for another with the same inputs.
+  const base: Record<string, unknown> = rubric ? { __rubric: rubric, values } : { values };
+  if (account) base.__account = account;
+  const input = rubric || account ? base : values;
   return crypto.createHash("sha256").update(JSON.stringify(canonicalize(input))).digest("hex");
 }

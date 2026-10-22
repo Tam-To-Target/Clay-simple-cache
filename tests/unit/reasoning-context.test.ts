@@ -28,3 +28,28 @@ describe("validateConfig account_type", () => {
     if (!r.valid) expect(r.errors.some((e: any) => String(e.path ?? e).includes("account_type"))).toBe(true);
   });
 });
+
+describe("buildContextBlock human context", () => {
+  it("adds the account name and each metric's plain-English meaning", () => {
+    const ctx = JSON.parse(
+      buildContextBlock({
+        ...BASE,
+        accountName: "NCDOT",
+        perCriterion: [{ key: "it_spend", value: 120000, subscore: 100, weight: 0.3, missing: false }],
+        descriptions: { it_spend: "Annual IT / software spend" },
+      })
+    );
+    expect(ctx.account_name).toBe("NCDOT");
+    expect(ctx.metrics[0].means).toBe("Annual IT / software spend");
+  });
+});
+
+describe("hashValues account key", () => {
+  it("is unchanged without an account and differs per account with one", async () => {
+    const { hashValues } = await import("../../src/scoring/engine");
+    const v = { population: 1 };
+    expect(hashValues(v, "cities")).toBe(hashValues(v, "cities", null));
+    expect(hashValues(v, "cities", "A")).not.toBe(hashValues(v, "cities", "B"));
+    expect(hashValues(v, null)).toBe(hashValues(v));
+  });
+});
